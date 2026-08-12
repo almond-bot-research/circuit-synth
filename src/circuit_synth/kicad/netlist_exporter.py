@@ -1366,7 +1366,9 @@ def generate_nets_section(circuit_data: Dict[str, Any]) -> List[Any]:
         net_code += 1
         logger.debug(f"  Created net entry structure: {net_entry}")
 
-        # Add nodes to this net
+        # Add nodes to this net (one entry per (ref, pin); the collector can
+        # visit a pin more than once)
+        seen_net_nodes = set()
         for node in nodes:
             # logger.debug(f"Processing node connection: {node}")
             component_ref = node.get("component")
@@ -1520,13 +1522,21 @@ def generate_nets_section(circuit_data: Dict[str, Any]) -> List[Any]:
                 f"  Mapped pin type for {component_ref}:{pin_num}: {pin_type} -> {mapped_pin_type}"
             )
 
-            # Normalize component reference by removing leading slash
-            normalized_ref = str(component_ref)
-            if normalized_ref.startswith("/"):
-                normalized_ref = normalized_ref[1:]
+            # Node refs must be bare designators: hierarchy is carried by the
+            # net name and each component's sheetpath. The node collector
+            # qualifies subcircuit components with their sheet path
+            # ("can_0_esd/D1"), which KiCad would treat as a literal (and
+            # unknown) reference - keep only the designator.
+            normalized_ref = str(component_ref).rsplit("/", 1)[-1]
+            if normalized_ref != str(component_ref):
                 logger.debug(
                     f"  Normalized component ref from {component_ref} to {normalized_ref}"
                 )
+
+            node_key = (normalized_ref, str(pin_num))
+            if node_key in seen_net_nodes:
+                continue
+            seen_net_nodes.add(node_key)
 
             # Create node entry with pin type and function
             node_entry = [
@@ -1791,6 +1801,7 @@ def generate_net_entry(
     net_entry = ["net", ["code", "0"], ["name", net_name]]
 
     # Add nodes by looking up pin details from component data
+    seen_nodes = set()
     for node_connection in nodes:
         component_ref = node_connection.get("component")
         pin_details = node_connection.get("pin")
@@ -1800,6 +1811,18 @@ def generate_net_entry(
                 f"Skipping invalid node connection in net '{net_name}': {node_connection}"
             )
             continue
+
+        # Node refs must be bare designators; hierarchy lives in the net name
+        # and each component's sheetpath. Internal bookkeeping may qualify the
+        # component with its sheet path ("/mcu/U8") - strip it here so the
+        # netlist stays loadable by KiCad and other consumers.
+        component_ref = component_ref.rsplit("/", 1)[-1]
+
+        # Collapse duplicate nodes (the exporter can visit a pin twice)
+        node_key = (component_ref, str(pin_details.get("number")))
+        if node_key in seen_nodes:
+            continue
+        seen_nodes.add(node_key)
 
         # Extract pin details using correct field names
         pin_num_str = pin_details.get("number")  # Use 'number' instead of 'num'

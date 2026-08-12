@@ -7,6 +7,9 @@
 [submodule "submodules/kicad-cli-docker"]
 	path = submodules/kicad-cli-docker
 	url = https://gitlab.com/kicad/packaging/kicad-cli-docker.git
+[submodule "submodules/kicad-sch-api"]
+	path = submodules/kicad-sch-api
+	url = https://github.com/circuit-synth/kicad-sch-api.git
 [submodule "submodules/kicad-mcp"]
 	path = submodules/kicad-mcp
 	url = https://github.com/lamaalrajih/kicad-mcp.git

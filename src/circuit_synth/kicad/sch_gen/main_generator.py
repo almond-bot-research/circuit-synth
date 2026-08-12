@@ -509,18 +509,27 @@ class SchematicGenerator:
         # Synchronize PCB after schematic sync
         logger.info("🔄 Synchronizing PCB with updated schematic...")
         try:
+            from circuit_synth.pcb import PCBNotAvailableError
             from circuit_synth.kicad.pcb_gen.pcb_synchronizer import PCBSynchronizer
 
             pcb_path = self.project_dir / f"{self.project_name}.kicad_pcb"
             if pcb_path.exists():
                 logger.info("📋 PCB file exists - using synchronizer to preserve manual placement")
-                pcb_sync = PCBSynchronizer(
-                    pcb_path=str(pcb_path),
-                    project_dir=self.project_dir,
-                    project_name=self.project_name
-                )
-                pcb_sync_report = pcb_sync.sync_with_schematics()
-                logger.info("✅ PCB synchronization complete!")
+                try:
+                    pcb_sync = PCBSynchronizer(
+                        pcb_path=str(pcb_path),
+                        project_dir=self.project_dir,
+                        project_name=self.project_name
+                    )
+                    pcb_sync_report = pcb_sync.sync_with_schematics()
+                    logger.info("✅ PCB synchronization complete!")
+                except PCBNotAvailableError:
+                    # PCB features are not part of this build; the board is
+                    # managed by external tooling. Leave it untouched.
+                    logger.info(
+                        "ℹ️  PCB features not available in this version - leaving %s untouched",
+                        pcb_path.name,
+                    )
             else:
                 logger.info("ℹ️  No PCB file found - skipping PCB sync")
         except Exception as e:

@@ -227,7 +227,9 @@ class SymbolBoundingBoxCalculator:
 
         elif shape_type == "circle":
             center = shape.get("center", [0, 0])
-            radius = shape.get("radius", 0)
+            # Tolerate circles parsed without a radius (e.g. legacy data
+            # cached before end-point-form circles were normalized).
+            radius = shape.get("radius") or 0
             return (
                 center[0] - radius,
                 center[1] - radius,

@@ -6,6 +6,7 @@ Handles "extends" inheritance by merging parent symbol data into the child.
 """
 
 import logging
+import math
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -315,6 +316,21 @@ def _parse_graphic_element(elem: List[Any]) -> Dict[str, Any]:
                     f_k = _key(f_item[0])
                     if f_k == "type":
                         shape_data["fill_type"] = str(f_item[1])
+
+    # Circles can be written as (circle (center x y) (radius r)) or, in
+    # converter output (e.g. easyeda), as (circle (center x y) (end x y)).
+    # Normalize the end-point form to a radius so downstream consumers
+    # (bounding box calculation, rendering) always have one.
+    if (
+        shape_type == "circle"
+        and shape_data["radius"] is None
+        and shape_data["center"] is not None
+        and shape_data["end"] is not None
+    ):
+        cx, cy = shape_data["center"]
+        ex, ey = shape_data["end"]
+        shape_data["radius"] = math.hypot(ex - cx, ey - cy)
+
     return shape_data
 
 

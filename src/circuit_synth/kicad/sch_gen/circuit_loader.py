@@ -275,31 +275,40 @@ def _parse_circuit(circ_data: dict, sub_dict: Dict[str, Circuit]) -> Circuit:
             net_obj = Net.from_dict(net_dict)
 
         # Parse connections and add them to the net
+        seen_connections = set()
         for conn in connections:
             comp_ref = conn["component"]
             pin_data = conn["pin"]
 
-            # Enhanced pin identification - store the most specific identifier available
+            # Pin identification: prefer the pin NUMBER, which is unique per
+            # symbol. Pin names are not unique (multiple IOVDD/GND/IO pins
+            # share a name), and identifying by name used to stack every
+            # label of a name group on the first matching pin - silently
+            # shorting nets that landed on same-named pins and leaving the
+            # other pins of the group unlabeled.
             pin_identifier = None
 
-            # First check if name is available (most specific)
-            if "name" in pin_data and pin_data["name"] != "~":
-                pin_identifier = pin_data["name"]
-                logger.debug(
-                    f"Using pin name '{pin_identifier}' for {comp_ref} in net {net_name}"
-                )
-            # Then check for number
-            elif "number" in pin_data:
+            if "number" in pin_data and str(pin_data["number"]):
                 pin_identifier = str(pin_data["number"])
                 logger.debug(
                     f"Using pin number '{pin_identifier}' for {comp_ref} in net {net_name}"
                 )
-            # Finally fall back to pin_id
+            elif "name" in pin_data and pin_data["name"] != "~":
+                pin_identifier = pin_data["name"]
+                logger.debug(
+                    f"Using pin name '{pin_identifier}' for {comp_ref} in net {net_name}"
+                )
             else:
                 pin_identifier = str(pin_data.get("pin_id", ""))
                 logger.debug(
                     f"Using pin ID '{pin_identifier}' for {comp_ref} in net {net_name}"
                 )
+
+            # The exporter can emit the same node more than once; one label
+            # per (component, pin) is enough.
+            if (comp_ref, pin_identifier) in seen_connections:
+                continue
+            seen_connections.add((comp_ref, pin_identifier))
 
             net_obj.connections.append((comp_ref, pin_identifier))
             logger.debug(

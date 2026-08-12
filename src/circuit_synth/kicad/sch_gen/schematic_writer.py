@@ -1445,7 +1445,7 @@ class SchematicWriter:
                     # logger.debug(f"   → power_rotation={power_rotation}°")
 
                     # Add power symbol at offset position
-                    self._add_power_symbol(
+                    power_uuid = self._add_power_symbol(
                         lib_id=net.power_symbol,
                         reference=power_ref,
                         value=net_name,
@@ -1453,8 +1453,19 @@ class SchematicWriter:
                         rotation=power_rotation,
                     )
 
-                    # Power symbols don't create labels - skip the rest
-                    continue
+                    if power_uuid:
+                        # Power symbols don't create labels - skip the rest
+                        continue
+
+                    # Power symbol creation can fail (e.g. the power library
+                    # is not on the symbol search path when building against
+                    # custom-only libraries). Fall back to a net label so the
+                    # pin still connects instead of silently dropping it.
+                    logger.warning(
+                        f"Power symbol {net.power_symbol} unavailable for net "
+                        f"{net_name} at {actual_ref}.{pin_identifier} - "
+                        f"falling back to a net label"
+                    )
 
                 # Determine label type: hierarchical if shared with parent OR used by children
                 # Local labels are ONLY for nets that are purely internal to this sheet

@@ -258,6 +258,16 @@ class NetlistExporter:
                 }
                 net_to_pins[net_name].append(pin_connection)
 
+        # Also include nets registered in this circuit that have no local
+        # component pins. A net created here but only used by subcircuits
+        # (a pass-through like a rail shared between two child sheets) must
+        # still appear in this scope: the schematic writer decides which
+        # child nets get hierarchical sheet pins by matching them against the
+        # parent scope's nets, so dropping pin-less nets silently severed
+        # child-to-child connectivity.
+        for net_name in self.circuit._nets:
+            net_to_pins.setdefault(net_name, [])
+
         # Store them in data["nets"] - include both nodes and Net properties
         for net_name, pin_list in net_to_pins.items():
             # Find the Net object to include its metadata

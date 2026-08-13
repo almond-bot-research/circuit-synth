@@ -92,6 +92,10 @@ test = [
 ]
 
 [project.scripts]
+# Umbrella CLI: build, pcb sync/apply-layouts/compare/extract-footprints,
+# bom export/verify, parts search/detail/datasheet/min-symbol, docs snapshot
+cs = "circuit_synth.tools.cs_cli:cli"
+
 # Sync scripts
 kicad-to-python = "circuit_synth.tools.kicad_integration.kicad_to_python_sync:main"
 python-to-kicad = "circuit_synth.tools.kicad_integration.python_to_kicad_sync:main"
@@ -175,7 +179,12 @@ circuit_synth = [
     "data/templates/project_template/circuit-synth/*",
     "data/templates/project_template/.claude/*",
     "data/templates/project_template/.claude/agents/*/*",
-    "data/templates/project_template/.claude/commands/*/*"
+    "data/templates/project_template/.claude/commands/*/*",
+    # Bundled standard footprint libraries + 3D models (circuit_synth.library)
+    "library/footprints/*/*.kicad_mod",
+    "library/footprints/*/*.kicad_sym",
+    "library/footprints/*/*.wrl",
+    "library/footprints/*/*.step",
 ]
 
 # Include all Python module files
@@ -231,21 +240,6 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 env = [
     "KICAD_SYMBOL_DIR=tests/test_data/kicad_symbols",
-]
-
-[tool.uv.workspace]
-members = [
-    "test_uv",
-    "cs_test",
-    "test_agent_setup/fresh_agent_test",
-    "test_agent_setup/validation_test",
-    "test_agent_setup/final_test",
-    "agent_validation_test/agent_test",
-    "test_generation/format_test",
-    "test_8_agents/test_project",
-    "test_install",
-    "test-project",
-    "test_project_creation",
 ]
 
 [dependency-groups]

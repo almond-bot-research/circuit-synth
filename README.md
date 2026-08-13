@@ -2,6 +2,12 @@
 
 Python-based circuit design with KiCad integration and AI acceleration.
 
+This fork ships the `cs` umbrella CLI (build, PCB sync/layout reuse, BOM
+export/verify, DigiKey/Mouser part search, datasheets) and a standard
+footprint library with co-located 3D models. See
+[docs/AGENT_WORKFLOW.md](docs/AGENT_WORKFLOW.md) for the agent-facing
+command reference.
+
 ## What is Code-Based Circuit Design?
 
 Circuit-synth brings software engineering practices to hardware design by letting you define circuits in Python code instead of clicking and dragging in a GUI. Your circuit becomes a program: testable, version-controlled, and composable.

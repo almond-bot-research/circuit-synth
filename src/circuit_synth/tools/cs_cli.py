@@ -221,6 +221,29 @@ def parts_datasheet(mpn: str, out: str, filename: str) -> None:
     sys.exit(fetch_datasheet(mpn, Path(out), filename))
 
 
+@parts.command("import")
+@click.argument("lcsc_id")
+@click.option(
+    "--out",
+    required=True,
+    type=click.Path(exists=True, file_okay=False),
+    help="parts/ root of the owning package.",
+)
+@click.option("--name", default="", help="Part directory name (default: Manufacturer_MPN).")
+@click.option("--no-datasheet", is_flag=True, help="Skip the datasheet download.")
+@click.option("--overwrite", is_flag=True, help="Replace an existing part directory's files.")
+def parts_import(lcsc_id: str, out: str, name: str, no_datasheet: bool, overwrite: bool) -> None:
+    """Import symbol, footprint, 3D model, and datasheet for LCSC_ID.
+
+    Fetches the EasyEDA CAD data behind an LCSC part number (find it on
+    lcsc.com) and writes a complete part directory. Footprints that exist in
+    the bundled standard libraries are referenced instead of copied.
+    """
+    from circuit_synth.manufacturing.part_import import import_part
+
+    sys.exit(import_part(lcsc_id, Path(out), name=name, datasheet=not no_datasheet, overwrite=overwrite))
+
+
 @parts.command("min-symbol")
 @click.option("--out", required=True, type=click.Path(file_okay=False), help="Part directory to write into.")
 @click.option("--name", required=True, help="Symbol name (also the file stem).")

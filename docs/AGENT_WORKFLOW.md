@@ -34,6 +34,7 @@ cs setup-kicad                                   # register ${CIRCUIT_SYNTH_LIB}
 ```bash
 cs parts search "<query>" [--in-stock]           # DigiKey + Mouser keyword search
 cs parts detail <MPN>                            # full distributor parameters
+cs parts import <LCSC_ID> --out <parts_root>     # one-command part onboarding (below)
 cs parts datasheet <MPN> --out <part_dir>        # download the datasheet PDF
 cs parts min-symbol ...                          # generate minimal KiCad symbols
 cs bom export <project_dir> <build>              # BOM CSV from the schematic
@@ -64,3 +65,23 @@ with a warning). Never commit credentials to a repo.
   `parts/<Part>/{*.kicad_sym, *.kicad_mod, *.step, *.wrl, <MPN>.pdf}`.
   Footprint `(model ...)` entries are bare filenames; `cs pcb sync`
   normalizes them. Every IC part dir carries its datasheet PDF.
+
+## Adding a new part
+
+After vetting the part with `cs parts search`/`detail` (spec, stock, price),
+find its LCSC id on lcsc.com and run:
+
+```bash
+cs parts import C165948 --out packages/<pkg>/parts
+```
+
+This fetches the EasyEDA CAD data and writes a complete part directory to
+the conventions above: `<Manufacturer>_<MPN>/` with the symbol lib
+(`<MPN>.kicad_sym`, footprint lib nickname = directory name), the footprint
+with its `.step`/`.wrl` models referenced by bare filename, and the
+datasheet PDF. When the package already exists in the bundled standard
+libraries the symbol references it (e.g. `Standard_Packages:SOT-23-5_...`)
+and no local footprint is written. The command prints a ready-to-paste
+`Component(...)` snippet for `parts.py`. Use `--name` to override the
+directory name (e.g. when the manufacturer string is non-ASCII) and
+`--overwrite` to refresh an existing part.

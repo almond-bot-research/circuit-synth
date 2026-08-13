@@ -332,6 +332,7 @@ dependencies = [
     { name = "beautifulsoup4" },
     { name = "cachetools" },
     { name = "click" },
+    { name = "easyeda2kicad" },
     { name = "fastapi" },
     { name = "kicad-sch-api" },
     { name = "loguru" },
@@ -411,6 +412,7 @@ requires-dist = [
     { name = "cachetools", specifier = ">=5.3.0" },
     { name = "claude-code-sdk", marker = "extra == 'claude'", specifier = ">=0.0.17" },
     { name = "click", specifier = ">=8.0.0" },
+    { name = "easyeda2kicad", specifier = ">=1.0.1" },
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "flake8", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "google-adk", marker = "extra == 'fast-generation'", specifier = ">=0.1.0" },
@@ -740,6 +742,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ae/ed/aefcc8cd0ba62a0560c3c18c33925362d46c6075480bfa4df87b28e169a9/docutils-0.21.2.tar.gz", hash = "sha256:3a6b18732edf182daa3cd12775bbb338cf5691468f91eeeb109deff6ebfa986f", size = 2204444, upload-time = "2024-04-23T18:57:18.24Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8f/d7/9322c609343d929e75e7e5e6255e614fcc67572cfd083959cdef3b7aad79/docutils-0.21.2-py3-none-any.whl", hash = "sha256:dafca5b9e384f0e419294eb4d2ff9fa826435bf15f15b7bd45723e8ad76811b2", size = 587408, upload-time = "2024-04-23T18:57:14.835Z" },
+]
+
+[[package]]
+name = "easyeda2kicad"
+version = "1.0.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ab/8b/9a7abcdbb2a3a86d55e40f59f7c28b24e7e8fe9fcc08949509fff386a9a5/easyeda2kicad-1.0.1.tar.gz", hash = "sha256:122a48fafa3b918e730185c973dd342183928b8a0dbe24436d13d58b90290e84", size = 65774, upload-time = "2026-04-06T09:09:06.988Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/47/be/9be36eb493d6a8eef8b8e73957e83d75f064b97d6abb1dcdfb3537b4f056/easyeda2kicad-1.0.1-py3-none-any.whl", hash = "sha256:b5a460650c5dd0af35a70658f433f63355fdbdf2c2b9e3bc411bc11ea98d06ed", size = 68704, upload-time = "2026-04-06T09:09:05.595Z" },
 ]
 
 [[package]]

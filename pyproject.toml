@@ -180,11 +180,16 @@ circuit_synth = [
     "data/templates/project_template/.claude/*",
     "data/templates/project_template/.claude/agents/*/*",
     "data/templates/project_template/.claude/commands/*/*",
-    # Bundled standard footprint libraries + 3D models (circuit_synth.library)
-    "library/footprints/*/*.kicad_mod",
-    "library/footprints/*/*.kicad_sym",
-    "library/footprints/*/*.wrl",
-    "library/footprints/*/*.step",
+]
+
+# Bundled standard footprint libraries + 3D models. circuit_synth.library is
+# its own package, so its data files must be declared under its key (patterns
+# under the parent package don't reach into subpackages).
+"circuit_synth.library" = [
+    "footprints/*/*.kicad_mod",
+    "footprints/*/*.kicad_sym",
+    "footprints/*/*.wrl",
+    "footprints/*/*.step",
 ]
 
 # Include all Python module files

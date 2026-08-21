@@ -114,8 +114,9 @@ def pcb_fab(project_dir: str, build_name: str, zip_path: str) -> None:
     """Write the assembler's quote package to <project_dir>/fab/.
 
     X2 gerbers (all layers), drill + map, position CSV, IPC-2581 with
-    MPN/MFR/DigiKey columns, and the BOM CSV. Aborts on DRC errors and
-    warns on paste/fiducial/MPN issues the assembler would flag.
+    MPN/MFR/DigiKey columns, the BOM CSV, and the ECAD sources
+    (board/project/rules). Aborts on DRC errors and warns on
+    paste/fiducial/MPN issues the assembler would flag.
     """
     from circuit_synth.manufacturing.bom_csv import export as bom_export_fn
 

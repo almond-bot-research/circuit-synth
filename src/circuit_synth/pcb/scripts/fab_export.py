@@ -10,6 +10,8 @@ Writes <layout_dir>/fab/ in the layout the assembly house asks for
 - <build>.xml: IPC-2581 with Manufacturer/MPN/DigiKey BOM columns read
   off the footprint fields (stamped by `cs pcb sync` from parts.py)
 - <build>.bom.csv: copied from the layout dir (`cs bom export` runs it)
+- <build>.kicad_pcb/.kicad_pro/.kicad_dru: the ECAD source, listed as
+  "optional but helpful" on the assembler's constraints page
 
 Preflight gates the export: DRC errors or unconnected items abort, and
 the assembler's paste conventions are checked (no paste apertures on
@@ -127,6 +129,11 @@ def export(project_dir: Path, build_name: str, zip_path: str) -> int:
         (fab / bom.name).write_bytes(bom.read_bytes())
     else:
         print(f"  warn: {bom.name} not found; run `cs bom export` and re-run")
+
+    for ext in (".kicad_pcb", ".kicad_pro", ".kicad_dru"):
+        src = project_dir / f"{build_name}{ext}"
+        if src.exists():
+            (fab / src.name).write_bytes(src.read_bytes())
 
     files = sorted(p for p in fab.rglob("*") if p.is_file())
     print(f"[{build_name}] fab package: {len(files)} files -> {fab}")

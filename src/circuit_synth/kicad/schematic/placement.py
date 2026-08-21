@@ -729,7 +729,17 @@ class PlacementEngine:
 
         # Add sheet bounds if sheets exist
         if hasattr(self.schematic, "sheets"):
-            for sheet in self.schematic.sheets:
+            sheets = self.schematic.sheets
+            if hasattr(sheets, "sheets"):
+                # circuit_synth SheetManager wraps {uuid: SheetInfo}
+                sheets = [info.sheet for info in sheets.sheets.values()]
+            try:
+                sheet_list = list(sheets)
+            except TypeError:
+                # unknown manager type (e.g. kicad_sch_api SheetManager):
+                # sheet bounds are a best-effort placement heuristic, skip them
+                sheet_list = []
+            for sheet in sheet_list:
                 # Sheets store their position as top-left corner
                 bounds.append(
                     ElementBounds(

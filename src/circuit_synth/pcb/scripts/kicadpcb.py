@@ -115,10 +115,11 @@ def one(node, key, default=None):
 class Netlist:
     """Parsed KiCad netlist (exported from the generated schematic)."""
 
-    def __init__(self, comps, pad_nets, paths):
+    def __init__(self, comps, pad_nets, paths, values=None):
         self.comps = comps        # ref -> footprint "LIB:NAME"
         self.pad_nets = pad_nets  # (ref, pad) -> net name
         self.paths = paths        # ref -> KIID path string "/sheet-uuid/symbol-uuid"
+        self.values = values or {}  # ref -> schematic value text
 
     def nets(self) -> dict[str, set]:
         out: dict[str, set] = {}
@@ -140,9 +141,11 @@ def export_netlist(project_dir: Path, build_name: str) -> Netlist:
 
     comps = {}
     paths = {}
+    values = {}
     for comp in items(one(tree, "components") or [], "comp"):
         ref = one(comp, "ref")[1]
         comps[ref] = (one(comp, "footprint") or ["", ""])[1]
+        values[ref] = (one(comp, "value") or ["", ""])[1]
         sheetpath = one(comp, "sheetpath")
         tstamps = (one(comp, "tstamps") or ["", ""])[1]
         sheet_tstamps = ""
@@ -157,7 +160,7 @@ def export_netlist(project_dir: Path, build_name: str) -> Netlist:
             ref = one(node, "ref")[1]
             pad = one(node, "pin")[1]
             pad_nets[(ref, pad)] = name
-    return Netlist(comps, pad_nets, paths)
+    return Netlist(comps, pad_nets, paths, values)
 
 
 # ---------------------------------------------------------------- addresses

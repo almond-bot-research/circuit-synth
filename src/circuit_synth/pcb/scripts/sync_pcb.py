@@ -118,7 +118,6 @@ def sync(project_dir: Path, build_name: str) -> None:
         if fp is not None and fp.GetFPID().GetUniStringLibId() != fpid:
             new_fp = load_footprint(libs, fpid)
             new_fp.SetReference(ref)
-            new_fp.SetValue(fp.GetValue())
             new_fp.SetPosition(fp.GetPosition())
             new_fp.SetOrientation(fp.GetOrientation())
             if fp.IsFlipped():
@@ -175,6 +174,11 @@ def sync(project_dir: Path, build_name: str) -> None:
                 desc.SetText("")
         for name, value in comp_fields.items():
             set_field(fp, name, value)
+        # Value comes from the schematic on every sync, so footprint swaps
+        # can't leave a stale display value behind (the fab exports' pos CSV
+        # shows it to the assembler).
+        if netlist.values.get(ref) and fp.GetValue() != netlist.values[ref]:
+            fp.SetValue(netlist.values[ref])
         if netlist.paths.get(ref):
             fp.SetPath(pcbnew.KIID_PATH(netlist.paths[ref]))
 

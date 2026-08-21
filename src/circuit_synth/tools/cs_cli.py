@@ -8,6 +8,7 @@ writing ad-hoc scripts:
   cs pcb apply-layouts ...             seed a board from package layouts
   cs pcb compare ...                   verify connectivity against a reference board
   cs pcb extract-footprints ...        lift footprints out of a board
+  cs pcb fab ...                       export the assembler's quote package
   cs bom export ...                    write the BOM CSV
   cs bom verify ...                    check sourcing against DigiKey/Mouser
   cs parts search|detail|datasheet     pick parts from live distributor data
@@ -103,6 +104,26 @@ def pcb_apply_layouts(project_dir: str, build_name: str, mappings: tuple[str, ..
     if force:
         args.append("--force")
     _pcb_script("apply_package_layouts.py", args)
+
+
+@pcb.command("fab")
+@click.argument("project_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("build_name")
+@click.option("--zip", "zip_path", default="", help="Also write the package as a zip here.")
+def pcb_fab(project_dir: str, build_name: str, zip_path: str) -> None:
+    """Write the assembler's quote package to <project_dir>/fab/.
+
+    X2 gerbers (all layers), drill + map, position CSV, IPC-2581 with
+    MPN/MFR/DigiKey columns, and the BOM CSV. Aborts on DRC errors and
+    warns on paste/fiducial/MPN issues the assembler would flag.
+    """
+    from circuit_synth.manufacturing.bom_csv import export as bom_export_fn
+
+    bom_export_fn(Path(project_dir).resolve(), build_name)
+    args = [str(Path(project_dir).resolve()), build_name]
+    if zip_path:
+        args += ["--zip", zip_path]
+    _pcb_script("fab_export.py", args)
 
 
 @pcb.command("compare")

@@ -14,10 +14,16 @@ Writes <layout_dir>/fab/ in the layout the assembly house asks for
   "optional but helpful" on the assembler's constraints page
 
 Preflight gates the export: DRC errors or unconnected items abort, and
-the assembler's paste conventions are checked (no paste apertures on
-pure-THT parts, paste on the THT pads of mixed SMT+THT parts) along
-with fiducial count and MPN coverage. Those report as warnings so a
-deliberate exception doesn't block an order.
+so does copper spacing below the fab's gerber-measured minimum
+(fab_rules.MIN_COPPER_SPACING_MM). That check is net-blind - it merges
+each copper layer's tracks, pads, vias, and zone fills into islands the
+way the fab sees the gerbers, then measures gaps between islands -
+because KiCad's own clearance engine skips same-net pairs, which is
+exactly where sub-3.5mil slivers (parallel same-net tracks, tight via
+stitching) hide. The assembler's paste conventions are also checked (no
+paste apertures on pure-THT parts, paste on the THT pads of mixed
+SMT+THT parts) along with fiducial count and MPN coverage. Those report
+as warnings so a deliberate exception doesn't block an order.
 """
 
 from __future__ import annotations
@@ -31,7 +37,105 @@ from pathlib import Path
 
 import pcbnew
 
+from fab_rules import MIN_COPPER_SPACING_MM  # noqa: E402
 from kicadpcb import find_kicad_cli  # noqa: E402
+
+
+def _segment_distance(a1, a2, b1, b2) -> float:
+    def point_to_segment(p, s1, s2) -> float:
+        vx, vy = s2[0] - s1[0], s2[1] - s1[1]
+        wx, wy = p[0] - s1[0], p[1] - s1[1]
+        length_sq = vx * vx + vy * vy
+        t = 0.0 if length_sq == 0 else max(0.0, min(1.0, (wx * vx + wy * vy) / length_sq))
+        dx, dy = p[0] - (s1[0] + t * vx), p[1] - (s1[1] + t * vy)
+        return (dx * dx + dy * dy) ** 0.5
+
+    return min(
+        point_to_segment(a1, b1, b2),
+        point_to_segment(a2, b1, b2),
+        point_to_segment(b1, a1, a2),
+        point_to_segment(b2, a1, a2),
+    )
+
+
+def check_copper_spacing(board) -> list[str]:
+    """Net-blind spacing check: merge each copper layer into islands (the
+    fab's view of the gerbers) and report island-to-island gaps below
+    MIN_COPPER_SPACING_MM. Returns violation strings."""
+    to_mm = pcbnew.ToMM
+    max_error = pcbnew.FromMM(0.001)
+    grow = pcbnew.FromMM(MIN_COPPER_SPACING_MM + 0.01)
+    violations: list[str] = []
+
+    for layer in board.GetEnabledLayers().CuStack():
+        merged = pcbnew.SHAPE_POLY_SET()
+        for track in board.GetTracks():
+            if track.IsOnLayer(layer):
+                track.TransformShapeToPolygon(merged, layer, 0, max_error, pcbnew.ERROR_INSIDE)
+        for fp in board.GetFootprints():
+            for pad in fp.Pads():
+                if pad.IsOnLayer(layer):
+                    pad.TransformShapeToPolygon(merged, layer, 0, max_error, pcbnew.ERROR_INSIDE)
+        for zone in board.Zones():
+            if zone.GetIsRuleArea():
+                continue
+            if zone.IsOnLayer(layer) and zone.IsFilled():
+                fill = zone.GetFilledPolysList(layer)
+                for i in range(fill.OutlineCount()):
+                    merged.AddOutline(fill.Outline(i))
+                    for h in range(fill.HoleCount(i)):
+                        merged.AddHole(fill.Hole(i, h), merged.OutlineCount() - 1)
+        merged.Simplify()
+
+        # Segments of each island's boundary (outline plus any holes, so a
+        # feature sitting inside a pour knockout is measured too).
+        islands = []
+        for i in range(merged.OutlineCount()):
+            chains = [merged.Outline(i)]
+            chains += [merged.Hole(i, h) for h in range(merged.HoleCount(i))]
+            segments = []
+            for chain in chains:
+                pts = [
+                    (to_mm(chain.CPoint(k).x), to_mm(chain.CPoint(k).y))
+                    for k in range(chain.PointCount())
+                ]
+                segments += [(pts[k], pts[(k + 1) % len(pts)]) for k in range(len(pts))]
+            islands.append((segments, merged.Outline(i).BBox()))
+
+        layer_name = board.GetLayerName(layer)
+        for i in range(len(islands)):
+            for j in range(i + 1, len(islands)):
+                box_i = pcbnew.BOX2I(islands[i][1].GetPosition(), islands[i][1].GetSize())
+                box_i.Inflate(grow)
+                if not box_i.Intersects(islands[j][1]):
+                    continue
+
+                # Only compare boundary segments near the other island.
+                def near(segments, bbox):
+                    box = pcbnew.BOX2I(bbox.GetPosition(), bbox.GetSize())
+                    box.Inflate(grow)
+                    x0, y0 = to_mm(box.GetLeft()), to_mm(box.GetTop())
+                    x1, y1 = to_mm(box.GetRight()), to_mm(box.GetBottom())
+                    return [
+                        (a, b)
+                        for a, b in segments
+                        if max(min(a[0], b[0]), x0) <= min(max(a[0], b[0]), x1)
+                        and max(min(a[1], b[1]), y0) <= min(max(a[1], b[1]), y1)
+                    ]
+
+                best, best_at = 1e9, None
+                for a1, a2 in near(islands[i][0], islands[j][1]):
+                    for b1, b2 in near(islands[j][0], islands[i][1]):
+                        d = _segment_distance(a1, a2, b1, b2)
+                        if d < best:
+                            best = d
+                            best_at = ((a1[0] + b1[0]) / 2, (a1[1] + b1[1]) / 2)
+                if best < MIN_COPPER_SPACING_MM:
+                    violations.append(
+                        f"{layer_name}: {best:.4f}mm copper gap at "
+                        f"({best_at[0]:.3f}, {best_at[1]:.3f})"
+                    )
+    return violations
 
 
 def run_cli(*args: str) -> None:
@@ -60,6 +164,16 @@ def preflight(board, board_path: Path) -> list[str]:
         raise SystemExit(
             f"aborting: DRC reports {len(errors)} error(s) and "
             f"{len(unconnected)} unconnected item(s); fix them or ship a board you trust"
+        )
+
+    spacing = check_copper_spacing(board)
+    if spacing:
+        for v in spacing[:20]:
+            print(f"  spacing: {v}", file=sys.stderr)
+        raise SystemExit(
+            f"aborting: {len(spacing)} copper gap(s) below the fab's "
+            f"{MIN_COPPER_SPACING_MM}mm minimum spacing (measured net-blind on "
+            f"final copper, the way the fab reads the gerbers)"
         )
 
     fiducials = 0

@@ -6,11 +6,15 @@ the fab would reject without per-project setup:
 
 - board setup constraints go into the project's .kicad_pro
   (board.design_settings.rules), overwriting stale values on every sync
-- a .kicad_dru custom-rules file is created next to the board (only if
-  one doesn't already exist, so per-board additions survive) to relax
-  hole-to-hole spacing for same-net via stitching: JLCPCB's 0.5mm
-  hole-to-hole minimum applies between different nets, while same-net
-  vias can be packed to ~0.254mm
+- a .kicad_dru custom-rules file is created next to the board (per-board
+  additions survive: existing files only get missing stamped rules
+  appended) to relax hole-to-hole spacing for same-net via stitching
+  (JLCPCB's 0.5mm hole-to-hole minimum applies between different nets,
+  while same-net vias can be packed to ~0.254mm) and to enforce net-blind
+  via-to-via copper spacing: KiCad's clearance engine skips same-net
+  pairs, but the fab measures raw gerber gaps, so two same-net stitching
+  vias whose rings nearly touch are a spacing reject even though stock
+  DRC is silent (`cs pcb fab` cross-checks all copper, not just vias)
 - newly created boards default to 4 copper layers (the repo convention:
   In1 solid GND, In2 power islands)
 - copper pours are normalized to the repo convention on every sync:
@@ -41,9 +45,17 @@ JLCPCB_RULES = {
     "min_text_thickness": 0.08,
 }
 
-JLCPCB_DRU = """\
-(version 1)
+# JLCPCB's published multilayer minimum trace width/spacing is 3.5mil
+# (0.09mm) measured on the gerbers, i.e. between any two copper features
+# regardless of net.
+MIN_COPPER_SPACING_MM = 0.09
 
+# Each stamped rule as (name, text); apply_fab_rules appends rules that
+# are missing from an existing .kicad_dru by name.
+DRU_RULES = [
+    (
+        "same-net hole to hole",
+        """\
 # JLCPCB's 0.5mm hole-to-hole minimum applies to holes on different nets.
 # Same-net via stitching can be packed much tighter (JLC floor ~0.254mm),
 # so relax the check for same-net pairs; the board-setup 0.5mm still
@@ -51,7 +63,25 @@ JLCPCB_DRU = """\
 (rule "same-net hole to hole"
   (condition "A.Net == B.Net")
   (constraint hole_to_hole (min 0.3mm)))
-"""
+""",
+    ),
+    (
+        "via-via copper spacing",
+        """\
+# The fab measures copper spacing on the gerbers with no notion of nets,
+# but KiCad's clearance check skips same-net pairs, so stitching vias
+# packed just far enough apart not to touch (legal per hole-to-hole)
+# leave sub-3.5mil ring-to-ring slivers that the fab rejects.
+# physical_clearance is net-blind; overlapping same-net vias already
+# fail hole-to-hole, so this only fires on real gerber gaps.
+(rule "via-via copper spacing"
+  (condition "A.Type == 'Via' && B.Type == 'Via'")
+  (constraint physical_clearance (min {spacing}mm)))
+""".format(spacing=MIN_COPPER_SPACING_MM),
+    ),
+]
+
+JLCPCB_DRU = "(version 1)\n\n" + "\n".join(text for _, text in DRU_RULES)
 
 
 def apply_fab_rules(project_dir: Path, build_name: str) -> list[str]:
@@ -75,7 +105,19 @@ def apply_fab_rules(project_dir: Path, build_name: str) -> list[str]:
     dru_path = project_dir / f"{build_name}.kicad_dru"
     if not dru_path.exists():
         dru_path.write_text(JLCPCB_DRU)
-        notes.append(f"wrote {dru_path.name} (same-net hole-to-hole exception)")
+        notes.append(f"wrote {dru_path.name}")
+    else:
+        text = dru_path.read_text()
+        missing = [
+            (name, rule)
+            for name, rule in DRU_RULES
+            if f'(rule "{name}"' not in text
+        ]
+        if missing:
+            text = text.rstrip("\n") + "\n\n" + "\n".join(rule for _, rule in missing)
+            dru_path.write_text(text)
+            names = ", ".join(name for name, _ in missing)
+            notes.append(f"appended stamped rule(s) to {dru_path.name}: {names}")
 
     return notes
 

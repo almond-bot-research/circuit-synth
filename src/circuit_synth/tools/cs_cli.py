@@ -11,6 +11,8 @@ writing ad-hoc scripts:
   cs bom export ...                    write the BOM CSV
   cs bom verify ...                    check sourcing against DigiKey/Mouser
   cs parts search|detail|datasheet     pick parts from live distributor data
+  cs parts import <LCSC_ID>            onboard a part (symbol/footprint/3D/datasheet)
+  cs parts model <part_dir> --from ... install a manufacturer 3D model into a part
   cs parts min-symbol                  generate a minimal box symbol
   cs docs snapshot                     snapshot a web page to markdown
   cs setup-kicad                       register ${CIRCUIT_SYNTH_LIB} for the KiCad GUI
@@ -242,6 +244,58 @@ def parts_import(lcsc_id: str, out: str, name: str, no_datasheet: bool, overwrit
     from circuit_synth.manufacturing.part_import import import_part
 
     sys.exit(import_part(lcsc_id, Path(out), name=name, datasheet=not no_datasheet, overwrite=overwrite))
+
+
+@parts.command("model")
+@click.argument("part_dir", type=click.Path(exists=True, file_okay=False))
+@click.option(
+    "--from",
+    "source",
+    required=True,
+    help="STEP file, zip, directory, or URL (manufacturer download).",
+)
+@click.option(
+    "--rotate",
+    default="0,0,0",
+    show_default=True,
+    help="Model rotation in degrees, x,y,z.",
+)
+@click.option(
+    "--offset",
+    default="0,0,0",
+    show_default=True,
+    help="Model offset in mm, x,y,z.",
+)
+@click.option(
+    "--preview",
+    default="",
+    help="Render the footprint+model from above to this PNG for alignment checks.",
+)
+def parts_model(part_dir: str, source: str, rotate: str, offset: str, preview: str) -> None:
+    """Install a 3D model into PART_DIR and stamp its footprint's model block.
+
+    For parts LCSC doesn't stock (so `cs parts import` can't fetch a model):
+    download the STEP from the manufacturer and install it here. Re-running
+    replaces the model block, so iterate on --rotate/--offset until the
+    --preview render matches the silkscreen.
+    """
+    from circuit_synth.manufacturing.part_model import install_model
+
+    def triple(value: str) -> tuple[float, float, float]:
+        parts_ = [float(v) for v in value.split(",")]
+        if len(parts_) != 3:
+            raise SystemExit(f"expected x,y,z - got {value!r}")
+        return (parts_[0], parts_[1], parts_[2])
+
+    sys.exit(
+        install_model(
+            Path(part_dir),
+            source,
+            rotate=triple(rotate),
+            offset=triple(offset),
+            preview=preview,
+        )
+    )
 
 
 @parts.command("min-symbol")

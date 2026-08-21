@@ -200,4 +200,9 @@
 		(uuid "df97cab5-287a-4fd3-8a0b-aa5dcff70e96")
 	)
 	(embedded_fonts no)
+	(model "SOT-23-5.wrl"
+		(offset (xyz 0 0 0))
+		(scale (xyz 1 1 1))
+		(rotate (xyz 0 0 180))
+	)
 )

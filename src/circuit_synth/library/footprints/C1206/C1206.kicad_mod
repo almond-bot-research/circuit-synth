@@ -96,4 +96,9 @@
 		(uuid "525375e0-5bb8-3f61-09c3-f4a24830561d")
 	)
 	(embedded_fonts no)
+	(model "C_1206_3216Metric.wrl"
+		(offset (xyz 0 0 0))
+		(scale (xyz 1 1 1))
+		(rotate (xyz 0 0 0))
+	)
 )

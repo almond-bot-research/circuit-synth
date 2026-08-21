@@ -11,6 +11,10 @@ the schematic - is what the IPC-2581 fab export reads them from. Footprint
 3D model paths are normalized to stable references (models live next to
 their footprints; see kicadpcb.normalize_models).
 
+Every sync also stamps the fab's capabilities onto the project: board setup
+constraints in the .kicad_pro and a .kicad_dru with the same-net via
+stitching exception (see fab_rules).
+
 Usage:
   cs pcb sync <project_dir> <build_name>
 """
@@ -24,10 +28,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pcbnew  # noqa: E402
 
+from fab_rules import apply_board_fab_defaults, apply_fab_rules  # noqa: E402
 from kicadpcb import (  # noqa: E402
     assign_nets,
     export_netlist,
     fp_lib_paths,
+    heal_copper_nets,
+    load_addresses,
     load_fields,
     normalize_models,
     place_staging,
@@ -64,10 +71,39 @@ def sync(project_dir: Path, build_name: str) -> None:
     fields = load_fields(project_dir, build_name)
     libs = fp_lib_paths(project_dir)
 
-    if pcb_path.exists():
-        board = pcbnew.LoadBoard(str(pcb_path))
-    else:
+    new_board = not pcb_path.exists()
+    if new_board:
         board = pcbnew.CreateEmptyBoard()
+    else:
+        board = pcbnew.LoadBoard(str(pcb_path))
+
+    # References are not stable across schematic rebuilds (adding/removing a
+    # component renumbers its neighbors), but the address field is. Realign
+    # the board to the netlist by address before any by-ref matching, so a
+    # renumber renames footprints in place instead of scrambling identities
+    # (placement, groups, and nets following the wrong component).
+    addr_to_ref = {a: r for r, a in load_addresses(project_dir, build_name).items()}
+    renamed: list[str] = []
+    stale: list[str] = []
+    claimed: set[str] = set()
+    for fp in list(board.GetFootprints()):
+        field = fp.GetFieldByName("address")
+        addr = field.GetText() if field is not None else ""
+        if not addr:
+            continue
+        if addr in claimed:
+            raise SystemExit(f"two footprints on the board carry address {addr!r}")
+        new_ref = addr_to_ref.get(addr)
+        if new_ref is None:
+            # Component no longer exists in the design; its old reference may
+            # now belong to a different component, so remove it by address.
+            stale.append(fp.GetReference())
+            board.Delete(fp)
+        else:
+            claimed.add(addr)
+            if new_ref != fp.GetReference():
+                renamed.append(f"{fp.GetReference()}->{new_ref}")
+                fp.SetReference(new_ref)
 
     existing = {fp.GetReference(): fp for fp in board.GetFootprints()}
 
@@ -143,15 +179,29 @@ def sync(project_dir: Path, build_name: str) -> None:
             fp.SetPath(pcbnew.KIID_PATH(netlist.paths[ref]))
 
     assign_nets(board, netlist)
+    healed = heal_copper_nets(board)
     remodeled = normalize_models(board, project_dir, libs)
+    board_notes = apply_board_fab_defaults(board, new_board)
+    if board_notes and not new_board:
+        # Zone settings changed under existing fills; regenerate them.
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     pcbnew.SaveBoard(str(pcb_path), board)
-    print(f"[{build_name}] pcb sync: +{len(added)} -{len(removed)} swapped {len(swapped)} -> {pcb_path}")
+    print(
+        f"[{build_name}] pcb sync: +{len(added)} -{len(removed) + len(stale)} "
+        f"swapped {len(swapped)} -> {pcb_path}"
+    )
+    if renamed:
+        print(f"  renumbered (matched by address): {', '.join(renamed)}")
     if added:
         print(f"  added (staged below board): {', '.join(added)}")
     if swapped:
         print(f"  footprint swapped: {', '.join(swapped)}")
+    for note in healed:
+        print(f"  {note}")
     if remodeled:
         print(f"  3d model paths rewritten: {remodeled}")
+    for note in [*board_notes, *apply_fab_rules(project_dir, build_name)]:
+        print(f"  {note}")
 
 
 if __name__ == "__main__":

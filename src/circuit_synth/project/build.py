@@ -49,15 +49,29 @@ def setup_symbol_dirs(*dirs: Path) -> None:
     KICAD_SYMBOL_DIR is an individual part directory: kicad-sch-api validates
     entries non-recursively (it only globs `*.kicad_sym` at the top level),
     so parts roots would be rejected even though scanning is recursive.
+
+    Fails if two different roots provide a part directory with the same name:
+    duplicated part dirs inevitably drift apart (fixes land in one copy and
+    not the others), so shared parts must live in exactly one place.
     """
     part_dirs: list[Path] = []
+    seen: dict[str, Path] = {}
     for root in [*dirs, *footprint_lib_dirs()]:
         root = Path(root).resolve()
         if any(root.glob("*.kicad_sym")):
             part_dirs.append(root)
         for sub in sorted(p for p in root.iterdir() if p.is_dir()):
             if any(sub.glob("*.kicad_sym")):
-                part_dirs.append(sub)
+                dup = seen.get(sub.name)
+                if dup is not None and dup != sub:
+                    raise SystemExit(
+                        f"duplicate part library {sub.name!r}:\n  {dup}\n  {sub}\n"
+                        "Keep a single copy in a shared parts dir (listed in "
+                        "PARTS_DIRS by every design that uses it) and delete the rest."
+                    )
+                if dup is None:
+                    seen[sub.name] = sub
+                    part_dirs.append(sub)
     os.environ["KICAD_SYMBOL_DIR"] = ":".join(str(p) for p in part_dirs)
 
 

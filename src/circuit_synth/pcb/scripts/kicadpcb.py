@@ -336,6 +336,104 @@ def assign_nets(board, netlist: Netlist) -> list[str]:
     return warnings
 
 
+def heal_copper_nets(board) -> list[str]:
+    """Relabel tracks/vias whose net disagrees with every pad they touch.
+
+    Pads are authoritative right after assign_nets (they were just set from
+    the netlist), so an endpoint-connected copper cluster that lands only on
+    pads of one net but carries a different label is provably mislabeled -
+    the signature of a net-table renumber saved over the board by a stale
+    editor session. Clusters touching no pads, or pads of several nets, are
+    left alone.
+    """
+    import pcbnew
+
+    items = list(board.GetTracks())
+    if not items:
+        return []
+
+    def endpoints(item):
+        if item.GetClass() == "PCB_VIA":
+            return [item.GetPosition()]
+        return [item.GetStart(), item.GetEnd()]
+
+    # Union-find over copper items: connected where they share an endpoint on
+    # a common layer (through vias connect every layer at their position).
+    parent = list(range(len(items)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        parent[find(a)] = find(b)
+
+    by_point: dict[tuple[int, int], list[int]] = {}
+    for i, item in enumerate(items):
+        for p in endpoints(item):
+            by_point.setdefault((p.x, p.y), []).append(i)
+    for group in by_point.values():
+        vias = [i for i in group if items[i].GetClass() == "PCB_VIA"]
+        by_layer: dict[int, list[int]] = {}
+        for i in group:
+            if items[i].GetClass() != "PCB_VIA":
+                by_layer.setdefault(items[i].GetLayer(), []).append(i)
+        if vias:
+            anchor = vias[0]
+            for i in group:
+                union(i, anchor)
+        for same_layer in by_layer.values():
+            for i in same_layer[1:]:
+                union(i, same_layer[0])
+
+    pads = [pad for fp in board.GetFootprints() for pad in fp.Pads()]
+    pad_boxes = []
+    for pad in pads:
+        box = pad.GetBoundingBox()
+        pad_boxes.append((box.GetLeft(), box.GetTop(), box.GetRight(), box.GetBottom()))
+
+    def touched_pad_nets(cluster: list[int]) -> set[int]:
+        nets: set[int] = set()
+        for i in cluster:
+            item = items[i]
+            is_via = item.GetClass() == "PCB_VIA"
+            for p in endpoints(item):
+                for pad, (left, top, right, bottom) in zip(pads, pad_boxes):
+                    if not (left <= p.x <= right and top <= p.y <= bottom):
+                        continue
+                    if not is_via and not pad.IsOnLayer(item.GetLayer()):
+                        continue
+                    if pad.HitTest(p):
+                        nets.add(pad.GetNetCode())
+        return nets
+
+    clusters: dict[int, list[int]] = {}
+    for i in range(len(items)):
+        clusters.setdefault(find(i), []).append(i)
+
+    notes: list[str] = []
+    for cluster in clusters.values():
+        pad_nets = touched_pad_nets(cluster)
+        if len(pad_nets) != 1:
+            continue
+        (net_code,) = pad_nets
+        wrong = [i for i in cluster if items[i].GetNetCode() != net_code]
+        if not wrong:
+            continue
+        old_names = sorted({items[i].GetNetname() for i in wrong})
+        for i in wrong:
+            items[i].SetNetCode(net_code)
+        new_name = board.FindNet(net_code).GetNetname()
+        p = endpoints(items[wrong[0]])[0]
+        notes.append(
+            f"relabeled {len(wrong)} copper item(s) {', '.join(old_names)} -> "
+            f"{new_name} (cluster near ({p.x / 1e6:.2f}, {p.y / 1e6:.2f}))"
+        )
+    return notes
+
+
 def place_staging(fp, index: int, origin=(200.0, 220.0), pitch=(4.0, 4.0), columns=20) -> None:
     import pcbnew
 

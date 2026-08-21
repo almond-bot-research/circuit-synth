@@ -269,12 +269,36 @@ def normalize_models(board, project_dir: Path, libs: dict[str, Path]) -> int:
     `${KIPRJMOD}/../..` chains from older conventions); each is matched by
     filename against the models carried by the project's footprint libs and
     rewritten to a stable reference. Unknown filenames are left untouched.
-    Returns the number of rewritten paths.
+
+    Placed footprints with no 3D model at all inherit the model list (with
+    offsets/rotation) from their library footprint, so adding a model to a
+    part dir propagates to boards on the next sync.
+    Returns the number of rewritten/added paths.
     """
+    import pcbnew
+
     index = model_index(libs)
     changed = 0
+    lib_models: dict[str, list] = {}
     for fp in board.GetFootprints():
         models = fp.Models()
+        if models.size() == 0:
+            fpid = fp.GetFPID()
+            lib_path = libs.get(fpid.GetLibNickname().wx_str())
+            key = fpid.GetUniStringLibId()
+            if key not in lib_models:
+                lib_fp = (
+                    pcbnew.FootprintLoad(str(lib_path), fpid.GetLibItemName().wx_str())
+                    if lib_path is not None
+                    else None
+                )
+                lib_models[key] = list(lib_fp.Models()) if lib_fp is not None else []
+            for src in lib_models[key]:
+                # Only inherit models whose file we can locate; a dangling
+                # reference in a library footprint should not spread to boards.
+                if Path(str(src.m_Filename)).name.lower() in index:
+                    models.push_back(src)  # push_back copies
+                    changed += 1
         # Index access returns a reference; iterating the SWIG vector yields
         # copies whose mutation is silently lost.
         for i in range(models.size()):

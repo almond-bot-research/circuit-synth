@@ -114,26 +114,30 @@ class SymbolGeometry:
                 x = pin.position.x
                 y = pin.position.y
                 length = pin.length
-                orientation = pin.orientation
+                # kicad-sch-api's SchematicPin calls it `rotation`
+                orientation = getattr(pin, "orientation", None)
+                if orientation is None:
+                    orientation = getattr(pin, "rotation", 0)
+                orientation = int(round(orientation)) % 360
 
-            # Calculate pin endpoint
-            if orientation == 0:  # Right
-                end_x = x + length
-                end_y = y
-            elif orientation == 90:  # Up
-                end_x = x
-                end_y = y + length
-            elif orientation == 180:  # Left
-                end_x = x - length
-                end_y = y
-            else:  # 270 - Down
-                end_x = x
-                end_y = y - length
+                # Calculate pin endpoint
+                if orientation == 0:  # Right
+                    end_x = x + length
+                    end_y = y
+                elif orientation == 90:  # Up
+                    end_x = x
+                    end_y = y + length
+                elif orientation == 180:  # Left
+                    end_x = x - length
+                    end_y = y
+                else:  # 270 - Down
+                    end_x = x
+                    end_y = y - length
 
-            min_x = min(min_x, x, end_x)
-            max_x = max(max_x, x, end_x)
-            min_y = min(min_y, y, end_y)
-            max_y = max(max_y, y, end_y)
+                min_x = min(min_x, x, end_x)
+                max_x = max(max_x, x, end_x)
+                min_y = min(min_y, y, end_y)
+                max_y = max(max_y, y, end_y)
 
         # Calculate dimensions
         if min_x == float("inf"):

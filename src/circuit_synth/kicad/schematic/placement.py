@@ -604,28 +604,32 @@ class PlacementEngine:
             # First component - place at margin
             return (self.margin, self.margin)
 
-        # Get component size for spacing
-        if component:
-            size = self._estimate_component_size(component)
-            spacing = 5.08  # 200 mil spacing
-        else:
-            spacing = 5.08  # 200 mil default
+        # Clear the existing components by their full extent, not just their
+        # anchor points: several parts added in one sync otherwise land 5.08mm
+        # apart on top of each other, and their touching pins/labels short
+        # unrelated nets in KiCad's geometric connectivity.
+        spacing = 5.08  # 200 mil gap between bodies
+        new_w, new_h = self._estimate_component_size(component) if component else (10.0, 10.0)
+
+        def extent(comp, axis):
+            w, h = self._estimate_component_size(comp)
+            if axis == "x":
+                return comp.position.x + w / 2
+            return comp.position.y + h / 2
 
         if edge == "right":
-            # Find rightmost component
-            max_x = max(comp.position.x for comp in self.schematic.components)
-            # Place to the right with dynamic spacing
-            x = max_x + spacing
+            # Find right edge of the rightmost component
+            max_x = max(extent(comp, "x") for comp in self.schematic.components)
+            x = max_x + spacing + new_w / 2
             # Average Y position
             avg_y = sum(comp.position.y for comp in self.schematic.components) / len(
                 self.schematic.components
             )
             y = avg_y
         else:  # bottom
-            # Find bottommost component
-            max_y = max(comp.position.y for comp in self.schematic.components)
-            # Place below with dynamic spacing
-            y = max_y + spacing
+            # Find bottom edge of the bottommost component
+            max_y = max(extent(comp, "y") for comp in self.schematic.components)
+            y = max_y + spacing + new_h / 2
             # Average X position
             avg_x = sum(comp.position.x for comp in self.schematic.components) / len(
                 self.schematic.components

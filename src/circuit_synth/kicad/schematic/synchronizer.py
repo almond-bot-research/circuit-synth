@@ -23,6 +23,9 @@ from .net_matcher import NetMatcher
 from .placement import PlacementStrategy
 from .search_engine import SearchEngine, SearchQueryBuilder
 from .sync_strategies import (
+    AddressMatchStrategy,
+    circuit_user_fields,
+    kicad_property,
     ConnectionMatchStrategy,
     PositionRenameStrategy,
     ReferenceMatchStrategy,
@@ -123,6 +126,7 @@ class APISynchronizer:
         # Initialize matching strategies
         # Order matters: strategies are tried in sequence, first match wins
         self.strategies = [
+            AddressMatchStrategy(),                       # Hierarchical address - stable across renumbering
             UUIDMatchStrategy(self.search_engine),        # UUID - most reliable (stable across changes)
             ReferenceMatchStrategy(self.search_engine),   # Exact reference match
             PositionRenameStrategy(self.search_engine),   # Detect renames by position+properties
@@ -1055,6 +1059,13 @@ class APISynchronizer:
             # Add new matches that don't conflict
             new_matches_added = 0
             for circuit_id, kicad_ref in matches.items():
+                if self._addresses_conflict(
+                    circuit_components[circuit_id], kicad_components[kicad_ref]
+                ):
+                    logger.info(
+                        f"      SKIPPED (address conflict): {circuit_id} -> {kicad_ref}"
+                    )
+                    continue
                 if (
                     circuit_id not in all_matches
                     and kicad_ref not in all_matches.values()
@@ -1081,6 +1092,17 @@ class APISynchronizer:
 
         logger.info(f"  Final matches after all strategies: {len(all_matches)}")
         return all_matches
+
+    @staticmethod
+    def _addresses_conflict(circuit_comp: Dict, kicad_comp) -> bool:
+        """True if both sides carry an address and they differ.
+
+        Fallback strategies (value/footprint, position, connections) would
+        otherwise recycle a deleted part's symbol for an unrelated new part.
+        """
+        circuit_address = circuit_user_fields(circuit_comp).get("address")
+        kicad_address = kicad_property(kicad_comp, "address")
+        return bool(circuit_address and kicad_address and circuit_address != kicad_address)
 
     def _process_matches(
         self,
@@ -1118,6 +1140,15 @@ class APISynchronizer:
                     report.errors.append(f"Failed to rename {kicad_ref} → {circuit_ref}")
                     continue
 
+            # Keep user fields (address, MPN, distributor numbers, ...) in step
+            # with the circuit; otherwise a sourcing change in Python never
+            # reaches the schematic, its netlist, or the BOM exported from it
+            fields_changed = False
+            for name, value in circuit_user_fields(circuit_comp).items():
+                fields_changed |= self._set_user_property(kicad_comp, name, value)
+            if fields_changed and kicad_ref not in report.modified:
+                report.modified.append(kicad_ref)
+
             # Check if update needed (value, footprint, symbol, etc.)
             if self._needs_update(circuit_comp, kicad_comp):
                 success = self.component_manager.update_component(
@@ -1128,6 +1159,29 @@ class APISynchronizer:
                 )
                 if success:
                     report.modified.append(kicad_ref)
+
+    @staticmethod
+    def _set_user_property(kicad_comp, name: str, value: str) -> bool:
+        """Set a hidden user field on a schematic symbol; True if it changed.
+
+        Loaded properties are dicts carrying the field's position and
+        visibility, which the writer reuses - only the value is replaced.
+        """
+        data = getattr(kicad_comp, "_data", kicad_comp)
+        current = data.properties.get(name)
+        if isinstance(current, dict):
+            if current.get("value") == value:
+                return False
+            current["value"] = value
+        else:
+            if current == value:
+                return False
+            data.properties[name] = value
+            data.hidden_properties.add(name)
+        collection = getattr(kicad_comp, "_collection", None)
+        if collection is not None:
+            collection._mark_modified()
+        return True
 
     def _needs_update(self, circuit_comp: Dict, kicad_comp: SchematicSymbol) -> bool:
         """Check if a component needs updating."""
@@ -1235,9 +1289,16 @@ class APISynchronizer:
             value=comp_data["value"],
             footprint=comp_data.get("footprint"),
             placement_strategy=PlacementStrategy.EDGE_RIGHT,
+            # User fields (address, MPN, ...): without them the layout tools
+            # cannot match the new symbol to a footprint and the BOM misses it
+            **circuit_user_fields(comp_data),
         )
 
         if component:
+            # User fields are bookkeeping (address, sourcing), hidden like the
+            # ones the schematic writer emits for freshly generated sheets
+            data = getattr(component, "_data", component)
+            data.hidden_properties.update(circuit_user_fields(comp_data))
             report.added.append(comp_data["id"])
 
     def _determine_library_id(self, comp_data: Dict) -> str:

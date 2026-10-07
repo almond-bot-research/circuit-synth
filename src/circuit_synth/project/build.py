@@ -20,7 +20,7 @@ from circuit_synth.library import ENV_VAR as _LIB_ENV
 from circuit_synth.library import ensure_env, footprint_lib_dirs, library_root
 from circuit_synth.pcb.scripts.kicadpcb import find_kicad_cli
 
-from .address import finalize_design
+from .address import existing_refs, finalize_design
 from .schematic_labels import compute_global_nets, parse_spans, rewrite_labels
 
 # Historical namespace string (this module started life as
@@ -269,11 +269,15 @@ def build_project(
     Returns the project directory (`layouts/<build_name>`).
     """
     ensure_env()
-    addressed = finalize_design(circuit, ref_map)
+    out = Path(layouts_dir) / build_name
+    # Keep the designators the existing schematic already assigned: the
+    # schematic sync matches components by designator, so letting them
+    # renumber (anything declared after a newly added part shifts) would also
+    # scramble which symbol gets which value, footprint, and fields.
+    addressed = finalize_design(circuit, ref_map, keep_refs=existing_refs(out))
     global_nets = compute_global_nets(circuit)
     circuit.name = build_name
 
-    out = Path(layouts_dir) / build_name
     out.mkdir(parents=True, exist_ok=True)
 
     result = circuit.generate_kicad_project(

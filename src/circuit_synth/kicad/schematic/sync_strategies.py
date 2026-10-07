@@ -6,6 +6,11 @@ import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
+from ..property_utils import (
+    KICAD_SYMBOL_METADATA,
+    SYSTEM_PROPERTY_PREFIX,
+    convert_value_for_kicad,
+)
 from .net_matcher import NetMatcher
 from .search_engine import MatchType, SearchEngine
 
@@ -24,6 +29,75 @@ class SyncStrategy(ABC):
             Dictionary mapping circuit_id -> kicad_reference
         """
         pass
+
+
+# Properties that are not user fields: KiCad's built-in fields and the
+# per-sheet bookkeeping the schematic writer stamps on symbols
+_NON_USER_PROPERTIES = KICAD_SYMBOL_METADATA | {
+    "Reference",
+    "Value",
+    "Footprint",
+    "Datasheet",
+    "Description",
+    "hierarchy_path",
+    "project_name",
+    "root_uuid",
+}
+
+
+def circuit_user_fields(circuit_comp: Dict) -> Dict[str, str]:
+    """User fields (address, MPN, distributor numbers, ...) of a circuit component.
+
+    The synchronizer sees either a live circuit-synth Component (fields in
+    `_extra_fields`) or a SchematicSymbol rebuilt from the circuit JSON
+    (fields in `properties`, as plain strings).
+    """
+    original = circuit_comp.get("original")
+    extra = getattr(original, "_extra_fields", None)
+    if extra is None:
+        extra = getattr(original, "properties", None) or {}
+    fields = {}
+    for key, value in extra.items():
+        if key in _NON_USER_PROPERTIES or key.startswith(SYSTEM_PROPERTY_PREFIX):
+            continue
+        if key.startswith("__sexp_") or isinstance(value, dict):
+            continue
+        fields[key] = convert_value_for_kicad(value)
+    return fields
+
+
+def kicad_property(kicad_comp: Any, name: str):
+    """A schematic symbol's property value (loaded properties are dicts)."""
+    value = getattr(kicad_comp, "properties", {}).get(name)
+    return value.get("value") if isinstance(value, dict) else value
+
+
+class AddressMatchStrategy(SyncStrategy):
+    """
+    Match components by their hierarchical `address` field.
+
+    The address (e.g. "ldo.c_in") is the stable identity circuit-synth
+    designs give every component; unlike the designator it survives
+    renumbering, so it must be tried before reference matching - otherwise a
+    shifted designator pairs a circuit component with whatever unrelated
+    symbol now holds that reference.
+    """
+
+    def match_components(
+        self, circuit_components: Dict[str, Dict], kicad_components: Dict[str, Any]
+    ) -> Dict[str, str]:
+        by_address = {}
+        for kicad_ref, kicad_comp in kicad_components.items():
+            address = kicad_property(kicad_comp, "address")
+            if address:
+                by_address.setdefault(address, kicad_ref)
+
+        matches = {}
+        for circuit_id, circuit_comp in circuit_components.items():
+            address = circuit_user_fields(circuit_comp).get("address")
+            if address and address in by_address:
+                matches[circuit_id] = by_address[address]
+        return matches
 
 
 class UUIDMatchStrategy(SyncStrategy):

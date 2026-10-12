@@ -19,6 +19,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -93,10 +94,34 @@ def norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
+# Words that don't identify a manufacturer on their own
+GENERIC_MAKER_WORDS = {
+    "inc", "corp", "corporation", "co", "company", "ltd", "llc", "gmbh", "ag",
+    "the", "and", "group", "division", "international", "industries",
+    "electronics", "electronic", "elektronik", "electrical", "components",
+    "semiconductor", "semiconductors", "devices", "technology", "technologies",
+    "products", "general", "commercial", "vehicle",
+}
+
+
+def maker_words(name: str) -> set[str]:
+    """Distinctive words of a manufacturer name, accents folded (Würth -> wurth)."""
+    folded = unicodedata.normalize("NFKD", name or "").encode("ascii", "ignore").decode()
+    words = re.findall(r"[a-z0-9]+", folded.lower())
+    return {w for w in words if len(w) > 2 and w not in GENERIC_MAKER_WORDS}
+
+
 def same_maker(ours: str, theirs: str) -> bool:
-    """Distributors qualify manufacturer names ("... - Diodes Division")."""
+    """Distributors qualify and spell manufacturer names their own way.
+
+    DigiKey: "Diodes Incorporated" / "... - Diodes Division"; Mouser:
+    "Wurth Elektronik" for Würth, "SEI Stackpole" for Stackpole Electronics,
+    "Vishay Semiconductors" for Vishay General Semiconductor.
+    """
     a, b = norm(ours), norm(theirs)
-    return bool(a) and bool(b) and (a in b or b in a)
+    if not a or not b:
+        return False
+    return a in b or b in a or bool(maker_words(ours) & maker_words(theirs))
 
 
 def dead(status: str) -> bool:
@@ -236,15 +261,32 @@ class Mouser:
             raise RuntimeError("; ".join(str(e.get("Message", e)) for e in errors))
         return result
 
-    def lookup(self, mpn: str) -> dict | None:
-        """The catalog part whose MPN matches exactly, if any."""
+    def _exact(self, number: str) -> list[dict]:
+        """Exact part-number search; accepts an MPN or a Mouser number."""
         payload = self._post(
             MOUSER_PARTNUMBER_URL,
-            {"SearchByPartRequest": {"mouserPartNumber": mpn, "partSearchOptions": "Exact"}},
+            {"SearchByPartRequest": {"mouserPartNumber": number, "partSearchOptions": "Exact"}},
         )
-        found = ((payload.get("SearchResults") or {}).get("Parts")) or []
-        for part in found:
-            if norm(part.get("ManufacturerPartNumber", "")) == norm(mpn):
+        return ((payload.get("SearchResults") or {}).get("Parts")) or []
+
+    def lookup(self, mpn: str, manufacturer: str = "") -> dict | None:
+        """The catalog part whose MPN matches exactly, if any.
+
+        Generic MPNs (SMCJ30A, BZT52C12, ...) are made by several companies
+        and Mouser lists them all; pass `manufacturer` to pick the right one.
+        """
+        for part in self._exact(mpn):
+            if norm(part.get("ManufacturerPartNumber", "")) != norm(mpn):
+                continue
+            if manufacturer and not same_maker(manufacturer, part.get("Manufacturer", "")):
+                continue
+            return part
+        return None
+
+    def by_number(self, number: str) -> dict | None:
+        """The catalog part with this Mouser part number, if any."""
+        for part in self._exact(number):
+            if norm(part.get("MouserPartNumber", "")) == norm(number):
                 return part
         return None
 

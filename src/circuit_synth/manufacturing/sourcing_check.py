@@ -144,24 +144,46 @@ def check_digikey(dk: DigiKey, mpn: str, entry: dict) -> list[tuple[str, str]]:
     return out
 
 
-def check_mouser(mo: Mouser, mpn: str, entry: dict) -> list[tuple[str, str]]:
-    ours = entry["Mouser"]
-    part = mo.lookup(mpn)
-    if part is None:
-        return [(FAIL if ours else NOTE, f"Mouser does not carry {mpn}")]
-
+def mouser_health(part: dict) -> list[tuple[str, str]]:
     out = []
-    theirs = part.get("MouserPartNumber", "")
-    if ours and norm(ours) != norm(theirs):
-        out.append((FAIL, f"Mouser number {ours} does not match the catalog's {theirs}"))
-
     status = part.get("LifecycleStatus") or ""
     if dead(status):
         out.append((WARN, f"Mouser lifecycle status is {status!r}"))
-
     stock = part.get("AvailabilityInStock")
     if stock in ("0", 0):
         out.append((WARN, f"Mouser has no stock ({part.get('Availability') or 'none reported'})"))
+    return out
+
+
+def check_mouser(mo: Mouser, mpn: str, entry: dict) -> list[tuple[str, str]]:
+    """Verify the stored Mouser number via that number, like check_digikey.
+
+    Comparing against an MPN search instead is wrong for generic MPNs: Mouser
+    lists every maker's SMCJ30A, and the first hit need not be ours.
+    """
+    ours, out = entry["Mouser"], []
+    catalog = mo.by_number(ours) if ours else None
+
+    if catalog is not None:
+        out += mouser_health(catalog)
+        catalog_mpn = catalog.get("ManufacturerPartNumber", "")
+        catalog_mfr = catalog.get("Manufacturer", "")
+        if norm(catalog_mpn) != norm(mpn):
+            out.append(
+                (WARN, f"{ours} is Mouser's number for MPN {catalog_mpn!r}, we call the part {mpn!r}")
+            )
+        if not same_maker(entry["manufacturer"], catalog_mfr):
+            out.append((FAIL, f"{ours} is made by {catalog_mfr!r}, we say {entry['manufacturer']!r}"))
+        return out
+
+    part = mo.lookup(mpn, entry["manufacturer"])
+    if ours:
+        fix = f"; the catalog number for this part is {part.get('MouserPartNumber')}" if part else ""
+        out.append((FAIL, f"Mouser has no part number {ours}{fix}"))
+    elif part is None:
+        return [(NOTE, f"Mouser does not carry {mpn}")]
+    if part is not None:
+        out += mouser_health(part)
     return out
 
 

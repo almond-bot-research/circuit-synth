@@ -38,9 +38,17 @@ cs parts import <LCSC_ID> --out <parts_root>     # one-command part onboarding (
 cs parts datasheet <MPN> --out <part_dir>        # download the datasheet PDF
 cs parts min-symbol ...                          # generate minimal KiCad symbols
 cs bom export <project_dir> <build>              # BOM CSV from the schematic
-cs bom verify [<project_dir> <build>] [--only MPN]
+cs bom verify [<project_dir> <build>] [--only MPN] [--low-stock BOARDS]
 cs docs snapshot <url> <out.md>                  # HTML -> markdown snapshot
 ```
+
+`cs bom verify` also checks stock on the distributor numbers the BOM records
+and prints it per part (`DigiKey 4,513,879 / Mouser 2,046,812`). A part
+fails when its DigiKey listing (the primary source) has no stock, or when no
+recorded listing has any. A backup listing (Mouser) at 0, or any listing
+holding fewer than `--low-stock` boards' worth (default 100 x the part's
+per-board quantity), is a warning. Lookup errors are warnings, never out of
+stock.
 
 Credentials live in `~/.circuit_synth/credentials` (dotenv format):
 

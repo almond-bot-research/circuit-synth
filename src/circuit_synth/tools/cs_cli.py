@@ -10,7 +10,7 @@ writing ad-hoc scripts:
   cs pcb extract-footprints ...        lift footprints out of a board
   cs pcb fab ...                       export the assembler's quote package
   cs bom export ...                    write the BOM CSV
-  cs bom verify ...                    check sourcing against DigiKey/Mouser
+  cs bom verify ...                    check sourcing and stock against DigiKey/Mouser
   cs parts search|detail|datasheet     pick parts from live distributor data
   cs parts import <LCSC_ID>            onboard a part (symbol/footprint/3D/datasheet)
   cs parts model <part_dir> --from ... install a manufacturer 3D model into a part
@@ -185,19 +185,32 @@ def bom_export(project_dir: str, build_name: str) -> None:
 @bom.command("verify")
 @click.argument("builds", nargs=-1)
 @click.option("--only", help="Check a single MPN.")
-def bom_verify(builds: tuple[str, ...], only: str | None) -> None:
-    """Check MPNs and distributor numbers against DigiKey/Mouser.
+@click.option(
+    "--low-stock",
+    type=click.IntRange(min=0),
+    default=100,
+    show_default=True,
+    metavar="BOARDS",
+    help="Warn when a recorded listing's stock covers fewer than BOARDS boards "
+    "(stock < BOARDS x the part's per-board quantity). 0 turns the warning off.",
+)
+def bom_verify(builds: tuple[str, ...], only: str | None, low_stock: int) -> None:
+    """Check MPNs, distributor numbers and stock against DigiKey/Mouser.
 
     BUILDS are <project_dir> <build_name> pairs; with none given, every
     layouts/<build>/<build>.json project under the current directory is
-    checked. Exits non-zero when any part fails.
+    checked. Stock is read from the DigiKey/Mouser numbers the BOM records:
+    a part fails when its DigiKey listing (the primary source) has no
+    stock, or when no recorded listing has any; a backup listing at 0 or
+    any listing below --low-stock is a warning. Lookup errors are warnings,
+    never out of stock. Exits non-zero when any part fails.
     """
     from circuit_synth.manufacturing.sourcing_check import verify
 
     if len(builds) % 2:
         raise SystemExit("BUILDS must be <project_dir> <build_name> pairs")
     pairs = [(Path(builds[i]), builds[i + 1]) for i in range(0, len(builds), 2)]
-    sys.exit(verify(pairs, only=only))
+    sys.exit(verify(pairs, only=only, low_stock=low_stock))
 
 
 # -------------------------------------------------------------------- parts

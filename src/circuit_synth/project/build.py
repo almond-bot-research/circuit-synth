@@ -18,6 +18,7 @@ from pathlib import Path
 from circuit_synth import Circuit
 from circuit_synth.library import ENV_VAR as _LIB_ENV
 from circuit_synth.library import ensure_env, footprint_lib_dirs, library_root
+from circuit_synth.pcb.scripts.design_rules import apply_net_classes, unmatched_patterns
 from circuit_synth.pcb.scripts.kicadpcb import find_kicad_cli
 
 from .address import existing_refs, finalize_design
@@ -263,8 +264,18 @@ def build_project(
     build_name: str,
     parts_dirs: list[Path],
     ref_map: dict[str, str] | Path | None = None,
+    netclasses: dict[str, list[str]] | None = None,
 ) -> Path:
     """Generate the KiCad project (schematic + netlists) for one build.
+
+    `netclasses` assigns nets to net classes, as {class: [pattern, ...]}
+    with KiCad net-name patterns (`*`/`?` wildcards, full board net names,
+    e.g. "/V24_IN" for a hierarchical-label net, "VM" for a global one). It
+    replaces the project's netclass_patterns; when omitted, the patterns
+    already in the .kicad_pro are left alone. Classes must be one of the
+    standard classes (design_rules.STANDARD_NET_CLASSES, stamped into the
+    project here and on every `cs pcb sync`) or already defined in the
+    .kicad_pro. Patterns that match no net are reported as warnings.
 
     Returns the project directory (`layouts/<build_name>`).
     """
@@ -296,8 +307,13 @@ def build_project(
     _sync_footprints(out, build_name)
     rewrite_labels(out, build_name, global_nets)
     _lib_tables(out, list(parts_dirs))
+    # Before the netlist export, which records each net's class
+    for note in apply_net_classes(out / f"{build_name}.kicad_pro", netclasses):
+        print(f"[{build_name}] {note}")
     # After label rewriting: the labels define the connectivity kicad-cli sees
     _export_netlist(out, build_name)
+    for pattern in unmatched_patterns(netclasses or {}, out / f"{build_name}.net"):
+        print(f"[{build_name}] warning: net-class pattern matches no net: {pattern}")
 
     print(f"[{build_name}] {len(addressed)} addressed components -> {out}")
     return out

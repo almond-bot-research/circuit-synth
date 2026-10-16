@@ -29,6 +29,75 @@ cs setup-kicad                                   # register ${CIRCUIT_SYNTH_LIB}
   model paths are rewritten to stable `${CIRCUIT_SYNTH_LIB}` /
   `${KIPRJMOD}` references.
 
+## Board design rules
+
+Every `cs pcb sync` stamps the board conventions, so they never have to be
+copied between boards by hand:
+
+- JLCPCB fab minimums into `<build>.kicad_pro`
+  (`board.design_settings.rules`), and a base `<build>.kicad_dru`
+  (`pcb/scripts/fab_rules.py`). Copper pours are normalized to 0.2mm
+  clearance / 0.1mm min width / solid pad connections.
+- The standard net classes (`pcb/scripts/design_rules.py`,
+  `STANDARD_NET_CLASSES`) into `net_settings.classes`. Missing classes are
+  added and drifted values of the standard ones are reset; other
+  (design-specific) classes are left alone. `cs build` stamps them too.
+
+  | Class           | Clearance | Track | Via (dia/drill) |
+  |-----------------|-----------|-------|-----------------|
+  | `Default`       | 0.13      | 0.2   | 0.6 / 0.3       |
+  | `Power_24V`     | 0.3       | 3.0   | 1.2 / 0.6       |
+  | `Power_24V_SRC` | 0.2       | 0.7   | 1.2 / 0.6       |
+  | `Power_5V`      | 0.13      | 0.3   | 0.8 / 0.4       |
+
+- DRC rules carried by part dirs: a part dir may ship a `rules.kicad_dru`
+  fragment for rules that belong to the package rather than to a board
+  (e.g. a clearance exception for a fine-pitch footprint). When any
+  footprint from that lib is on the board, its rules are appended to
+  `<build>.kicad_dru`. Scope the condition to the lib so the rule only
+  fires on its part:
+
+  ```
+  (version 1)
+
+  # Comment lines directly above a rule are copied with it.
+  (rule "LM74502 fine-pitch pins"
+    (condition "A.memberOfFootprint('TI_LM74502QDDFRQ1:*') || B.memberOfFootprint('TI_LM74502QDDFRQ1:*')")
+    (constraint clearance (min 0.25mm)))
+  ```
+
+All `.kicad_dru` stamping is append-if-missing by rule name: an existing
+rule is never rewritten (so per-board edits survive, and editing a rule at
+its source does not reach boards that already have it - delete the rule
+from the board's file and re-sync). Rule names must be unique across part
+dirs.
+
+Net-class assignments are per design (net names differ per board) and are
+declared in the design's `build.py`:
+
+```python
+build_project(
+    app(),
+    DESIGN_DIR / "layouts",
+    "default",
+    parts_dirs=PARTS_DIRS,
+    netclasses={
+        "Power_24V": ["/V24_IN", "V24_F", "V24"],
+        "Power_24V_SRC": ["/input_protection/SRC"],
+        "Power_5V": ["VBUS", "VBUS_FILT"],
+    },
+)
+```
+
+Values are KiCad net-name patterns (`*`/`?` wildcards) matched against the
+full board net name, as shown in pcbnew: hierarchical-label nets carry a
+`/` prefix (`/V24_IN`), global/power nets do not (`VBUS`). The argument
+replaces the project's `net_settings.netclass_patterns` on every build
+(order kept); without it, patterns already in the `.kicad_pro` are left
+alone. The class must be a standard class or one already defined in the
+`.kicad_pro`; patterns that match no net in the netlist print a warning.
+`cs pcb sync` never changes the assignments.
+
 ## Parts and sourcing
 
 ```bash

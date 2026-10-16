@@ -8,6 +8,7 @@ and no LM74502 rule.
 """
 
 import json
+import re
 import sys
 import types
 from pathlib import Path
@@ -257,7 +258,8 @@ def test_sync_stamps_classes_and_part_rules(tmp_path, fab_rules):
     notes = fab_rules.apply_fab_rules(tmp_path, "default", part_rules)
     dru = (tmp_path / "default.kicad_dru").read_text()
     assert [n for n, _ in parse_dru_rules(dru)] == [
-        "same-net hole to hole", "via-via copper spacing", "LM74502 fine-pitch pins"
+        "same-net hole to hole", "via-via copper spacing", "THT pads: thermal relief",
+        "LM74502 fine-pitch pins",
     ]
     assert set(_classes(pro)) == {"Default", "Power_24V", "Power_24V_SRC", "Power_5V"}
     assert _classes(pro)["Default"]["clearance"] == 0.13
@@ -269,3 +271,44 @@ def test_sync_stamps_classes_and_part_rules(tmp_path, fab_rules):
     assert any("part rule" in n for n in notes)
 
     assert fab_rules.apply_fab_rules(tmp_path, "default", part_rules) == []
+
+
+# ------------------------------------------------------------ THT thermal relief
+
+THT_RULE = "THT pads: thermal relief"
+
+
+def test_tht_thermal_relief_rule(fab_rules):
+    # Zones are forced solid on every sync; this rule is what gives
+    # through-hole pads spokes. Text verified against KiCad 9's zone filler
+    # (spokes on a THT pad in a GND plane, the SMD pads of the same USB-C
+    # footprint solid). KiCad doesn't report a bad property/value: an
+    # unknown zone_connection value drops the whole .kicad_dru, so pin the
+    # exact keywords.
+    rules = dict(fab_rules.DRU_RULES)
+    rule = rules[THT_RULE]
+    assert '(condition "A.Type == \'Pad\' && A.Pad_Type == \'Through-hole\'")' in rule
+    assert "(constraint zone_connection thermal_reliefs)" in rule
+    assert "(constraint thermal_spoke_width (min 0.5mm))" in rule
+    assert "(constraint thermal_relief_gap (min 0.3mm))" in rule
+    for text in rules.values():
+        for value in re.findall(r"\(constraint zone_connection (\w+)", text):
+            assert value in {"solid", "thermal_reliefs", "none"}
+
+
+def test_existing_board_gets_tht_rule_appended(tmp_path, fab_rules):
+    # A board stamped before the rule existed picks it up on the next sync;
+    # a per-board edit of an already-present stamped rule survives.
+    edited_same_net = dict(fab_rules.DRU_RULES)["same-net hole to hole"].replace("0.3mm", "0.28mm")
+    dru = tmp_path / "default.kicad_dru"
+    dru.write_text("(version 1)\n\n" + edited_same_net)
+    notes = fab_rules.apply_fab_rules(tmp_path, "default")
+    assert notes == [
+        f"appended stamped rule(s) to {dru.name}: via-via copper spacing, {THT_RULE}"
+    ]
+    text = dru.read_text()
+    assert "0.28mm" in text
+    assert [n for n, _ in parse_dru_rules(text)] == [
+        "same-net hole to hole", "via-via copper spacing", THT_RULE
+    ]
+    assert fab_rules.apply_fab_rules(tmp_path, "default") == []

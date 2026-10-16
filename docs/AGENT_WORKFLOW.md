@@ -37,7 +37,14 @@ copied between boards by hand:
 - JLCPCB fab minimums into `<build>.kicad_pro`
   (`board.design_settings.rules`), and a base `<build>.kicad_dru`
   (`pcb/scripts/fab_rules.py`). Copper pours are normalized to 0.2mm
-  clearance / 0.1mm min width / solid pad connections.
+  clearance / 0.1mm min width / solid pad connections, and the stamped
+  `THT pads: thermal relief` rule overrides that for through-hole pads
+  (0.5mm spokes, 0.3mm gap), so the convention is solid for SMD, thermal
+  reliefs for through-hole: THT pins are hand/selective-wave soldered
+  after reflow, and a solid tie to a plane sinks too much heat. The rule
+  is per pad, so a mixed footprint (USB-C receptacle) keeps its SMD pads
+  solid; a pad/footprint local zone-connection override still wins. Don't
+  change pad connections per zone in pcbnew: sync resets every zone.
 - The standard net classes (`pcb/scripts/design_rules.py`,
   `STANDARD_NET_CLASSES`) into `net_settings.classes`. Missing classes are
   added and drifted values of the standard ones are reset; other

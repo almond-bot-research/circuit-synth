@@ -13,7 +13,10 @@ their footprints; see kicadpcb.normalize_models).
 
 Every sync also stamps the fab's capabilities onto the project: board setup
 constraints in the .kicad_pro and a .kicad_dru with the same-net via
-stitching exception (see fab_rules).
+stitching exception (see fab_rules). It also stamps the standard net classes
+into the .kicad_pro and appends the DRC rules shipped by the part dirs of
+the footprints on the board (`<part_dir>/rules.kicad_dru`; see
+design_rules).
 
 Usage:
   cs pcb sync <project_dir> <build_name>
@@ -28,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pcbnew  # noqa: E402
 
+from design_rules import part_dru_rules  # noqa: E402
 from fab_rules import apply_board_fab_defaults, apply_fab_rules  # noqa: E402
 from kicadpcb import (  # noqa: E402
     assign_nets,
@@ -204,7 +208,9 @@ def sync(project_dir: Path, build_name: str) -> None:
         print(f"  {note}")
     if remodeled:
         print(f"  3d model paths rewritten: {remodeled}")
-    for note in [*board_notes, *apply_fab_rules(project_dir, build_name)]:
+    used_libs = {str(fp.GetFPID().GetLibNickname()) for fp in board.GetFootprints()}
+    part_rules = part_dru_rules(libs, used_libs)
+    for note in [*board_notes, *apply_fab_rules(project_dir, build_name, part_rules)]:
         print(f"  {note}")
 
 

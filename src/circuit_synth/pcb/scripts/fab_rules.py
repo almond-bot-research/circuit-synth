@@ -20,6 +20,10 @@ the fab would reject without per-project setup:
 - copper pours are normalized to the repo convention on every sync:
   0.2mm clearance, 0.1mm minimum width, solid (non-thermal-relief) pad
   connections
+
+Board conventions that are not fab capabilities - the standard net classes
+and DRC rules carried by part dirs (`<part_dir>/rules.kicad_dru`) - are
+stamped alongside these; see design_rules.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import json
 from pathlib import Path
 
 import pcbnew
+from design_rules import append_dru_rules, apply_net_classes
 
 # Keys and units match KiCad's board.design_settings.rules (mm).
 JLCPCB_RULES = {
@@ -84,8 +89,14 @@ DRU_RULES = [
 JLCPCB_DRU = "(version 1)\n\n" + "\n".join(text for _, text in DRU_RULES)
 
 
-def apply_fab_rules(project_dir: Path, build_name: str) -> list[str]:
-    """Stamp the fab capabilities onto one build. Returns log messages."""
+def apply_fab_rules(
+    project_dir: Path,
+    build_name: str,
+    part_rules: list[tuple[str, str]] = (),
+) -> list[str]:
+    """Stamp the fab capabilities, the standard net classes, and the given
+    part-carried DRC rules (design_rules.part_dru_rules) onto one build.
+    Returns log messages."""
     notes: list[str] = []
 
     pro_path = project_dir / f"{build_name}.kicad_pro"
@@ -101,23 +112,15 @@ def apply_fab_rules(project_dir: Path, build_name: str) -> list[str]:
             rules.update(JLCPCB_RULES)
             pro_path.write_text(json.dumps(data, indent=2) + "\n")
             notes.append(f"fab constraints stamped into {pro_path.name}: {', '.join(changed)}")
+    notes += apply_net_classes(pro_path)
 
     dru_path = project_dir / f"{build_name}.kicad_dru"
     if not dru_path.exists():
         dru_path.write_text(JLCPCB_DRU)
         notes.append(f"wrote {dru_path.name}")
     else:
-        text = dru_path.read_text()
-        missing = [
-            (name, rule)
-            for name, rule in DRU_RULES
-            if f'(rule "{name}"' not in text
-        ]
-        if missing:
-            text = text.rstrip("\n") + "\n\n" + "\n".join(rule for _, rule in missing)
-            dru_path.write_text(text)
-            names = ", ".join(name for name, _ in missing)
-            notes.append(f"appended stamped rule(s) to {dru_path.name}: {names}")
+        notes += append_dru_rules(dru_path, DRU_RULES, "stamped")
+    notes += append_dru_rules(dru_path, list(part_rules), "part")
 
     return notes
 

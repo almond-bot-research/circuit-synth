@@ -19,7 +19,11 @@ the fab would reject without per-project setup:
   In1 solid GND, In2 power islands)
 - copper pours are normalized to the repo convention on every sync:
   0.2mm clearance, 0.1mm minimum width, solid (non-thermal-relief) pad
-  connections
+  connections; a stamped .kicad_dru rule then gives through-hole pads
+  thermal reliefs (0.5mm spokes, 0.3mm gap) for post-reflow hand/wave
+  soldering, so the convention is solid for SMD, thermal reliefs for
+  through-hole. Per-zone pcbnew settings would be reset by the next sync;
+  the rule survives it
 
 Board conventions that are not fab capabilities - the standard net classes
 and DRC rules carried by part dirs (`<part_dir>/rules.kicad_dru`) - are
@@ -83,6 +87,30 @@ DRU_RULES = [
   (condition "A.Type == 'Via' && B.Type == 'Via'")
   (constraint physical_clearance (min {spacing}mm)))
 """.format(spacing=MIN_COPPER_SPACING_MM),
+    ),
+    (
+        "THT pads: thermal relief",
+        """\
+# Zones stay solid for reflowed SMD pads, but through-hole pins (relays,
+# lever terminals, USB shell tabs) are hand or selective-wave soldered
+# after reflow; tied solidly to a GND plane or a big 24V pour they sink
+# heat too fast for good barrel fill and rework. The rule overrides the
+# zone's connection per pad, so a mixed footprint's SMD pads stay solid,
+# and a pad/footprint local zone-connection override still wins (the
+# mounting-hole footprints force solid). Net-less pads never connect, so
+# plated holes are only affected when on a net, e.g. GND.
+# 0.5mm spokes on 1oz copper carry ~1.5A each at 10C rise even as long
+# traces (IPC-2152), and a spoke is only gap-length (0.3mm) long, so 4
+# spokes - on every poured layer the pin passes - comfortably carry 5A.
+# KiCad silently ignores a misspelt property or value here (a bad
+# zone_connection value drops the whole file), so re-check fills after
+# editing.
+(rule "THT pads: thermal relief"
+  (condition "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'")
+  (constraint zone_connection thermal_reliefs)
+  (constraint thermal_spoke_width (min 0.5mm))
+  (constraint thermal_relief_gap (min 0.3mm)))
+""",
     ),
 ]
 

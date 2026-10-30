@@ -118,8 +118,15 @@ class HierarchicalSynchronizer:
                     sheet_file = None
                     sheet_name = None
 
+                    # kicad-sch-api stores sheet entries as plain dicts
+                    if isinstance(sheet_elem, dict):
+                        sheet_file = sheet_elem.get("filename") or sheet_elem.get(
+                            "file"
+                        )
+                        sheet_name = sheet_elem.get("name")
+
                     # Direct attributes
-                    if hasattr(sheet_elem, "filename"):
+                    elif hasattr(sheet_elem, "filename"):
                         sheet_file = sheet_elem.filename
                     elif hasattr(sheet_elem, "file"):
                         sheet_file = sheet_elem.file

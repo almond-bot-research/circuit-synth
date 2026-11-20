@@ -9,6 +9,8 @@ writing ad-hoc scripts:
   cs pcb compare ...                   verify connectivity against a reference board
   cs pcb extract-footprints ...        lift footprints out of a board
   cs pcb fab ...                       export the assembler's quote package
+  cs pcb route ...                     apply a hand-written routing.py (not an autorouter)
+  cs pcb pads|drc|render ...           inspect a board without opening pcbnew
   cs bom export ...                    write the BOM CSV
   cs bom verify ...                    check sourcing and stock against DigiKey/Mouser
   cs parts search|detail|datasheet     pick parts from live distributor data
@@ -149,6 +151,79 @@ def pcb_extract_footprints(board: str, specs: tuple[str, ...]) -> None:
     SPECS are <ref>=<out_dir>:<footprint_name>.
     """
     _pcb_script("extract_footprints.py", [str(Path(board).resolve()), *specs])
+
+
+@pcb.command("route")
+@click.argument("project_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("build_name")
+@click.option("--routing", "routing", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Routing file (default: <project_dir>/routing.py).")
+@click.option("--no-fill", is_flag=True, help="Skip the zone refill.")
+def pcb_route(project_dir: str, build_name: str, routing: str | None, no_fill: bool) -> None:
+    """Apply a hand-written routing file (tracks, vias, zones) to the board.
+
+    Not an autorouter: routing.py defines route(r) and lists every trace
+    as waypoints (pads or coordinates, joined with 45 degree doglegs).
+    The copper it creates lives in one board group, `routing`, which is
+    rebuilt on every run; everything else on the board is left alone.
+    See circuit_synth/pcb/scripts/route_pcb.py for the Router API.
+    """
+    args = [str(Path(project_dir).resolve()), build_name]
+    args.append(str(Path(routing).resolve()) if routing else str(Path(project_dir).resolve() / "routing.py"))
+    if no_fill:
+        args.append("--no-fill")
+    _pcb_script("route_pcb.py", args)
+
+
+def _board_path(project_dir: str, build_name: str) -> str:
+    return str(Path(project_dir).resolve() / f"{build_name}.kicad_pcb")
+
+
+@pcb.command("pads")
+@click.argument("project_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("build_name")
+@click.option("--ref", "refs", multiple=True, help="Only these footprints (repeatable).")
+@click.option("--net", "nets", multiple=True, help="Only these nets (repeatable).")
+@click.option("--box", default=None, help="Only pads inside x0,y0,x1,y1 (mm).")
+def pcb_pads(project_dir: str, build_name: str, refs: tuple[str, ...], nets: tuple[str, ...], box: str | None) -> None:
+    """List pads (REF.PAD, pin function, net, x, y, layer, size)."""
+    args = ["pads", _board_path(project_dir, build_name)]
+    if refs:
+        args += ["--ref", *refs]
+    if nets:
+        args += ["--net", *nets]
+    if box:
+        args += ["--box", box]
+    _pcb_script("board_inspect.py", args)
+
+
+@pcb.command("drc")
+@click.argument("project_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("build_name")
+@click.option("--all", "all_severities", is_flag=True, help="Include warnings.")
+@click.option("--limit", default=40, show_default=True, help="Max items listed per section.")
+def pcb_drc(project_dir: str, build_name: str, all_severities: bool, limit: int) -> None:
+    """Run DRC and print violations and unrouted items with coordinates."""
+    args = ["drc", _board_path(project_dir, build_name), "--limit", str(limit)]
+    if all_severities:
+        args.append("--all")
+    _pcb_script("board_inspect.py", args)
+
+
+@pcb.command("render")
+@click.argument("project_dir", type=click.Path(exists=True, file_okay=False))
+@click.argument("build_name")
+@click.argument("out", type=click.Path(dir_okay=False))
+@click.option("--box", default=None, help="Region x0,y0,x1,y1 in board mm (default: whole page).")
+@click.option("--layers", default="F.Cu,B.Cu,Edge.Cuts", show_default=True)
+@click.option("--px", default=1600, show_default=True, help="Output width in pixels.")
+def pcb_render(project_dir: str, build_name: str, out: str, box: str | None, layers: str, px: int) -> None:
+    """Render the board, or a region of it, to PNG or SVG."""
+    args = ["render", _board_path(project_dir, build_name), str(Path(out).resolve()),
+            "--layers", layers, "--px", str(px)]
+    if box:
+        args += ["--box", box]
+    _pcb_script("board_inspect.py", args)
 
 
 @cli.command("kicad-py", context_settings={"ignore_unknown_options": True})

@@ -38,6 +38,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from circuit_synth.pcb.scripts.kicadpcb import is_dnp
+
 from .catalog import (
     DigiKey,
     Mouser,
@@ -93,7 +95,8 @@ def collect_parts(builds: list[tuple[Path, str]], root: Path) -> dict[str, dict]
             for comp in (circuit.get("components") or {}).values():
                 extra = comp.get("_extra_fields") or {}
                 mpn = extra.get("Partnumber")
-                if not mpn:
+                # do-not-populate parts are not bought for this build
+                if not mpn or is_dnp(extra):
                     continue
                 entry = parts.setdefault(
                     mpn,

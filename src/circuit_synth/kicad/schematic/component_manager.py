@@ -126,7 +126,9 @@ class ComponentManager:
         if properties:
             logger.debug(f"Property keys: {list(properties.keys())}")
 
-        # Check for DNP in properties to set in_bom/on_board flags
+        # DNP is recorded as the symbol's own "do not populate" flag (set by
+        # project.build after the sheets are written), never by taking the
+        # part off the board: an unpopulated part still needs its footprint.
         dnp_value = False
         if "DNP" in properties:
             dnp_str = properties["DNP"]
@@ -148,8 +150,8 @@ class ComponentManager:
             unit=unit,  # Set the unit number
             properties=properties,
             pins=symbol_def.pins.copy() if symbol_def.pins else [],
-            in_bom=not dnp_value,  # If DNP, exclude from BOM
-            on_board=not dnp_value,  # If DNP, exclude from board
+            in_bom=True,
+            on_board=True,
         )
 
         logger.debug(

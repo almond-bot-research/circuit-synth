@@ -165,6 +165,21 @@ def export_netlist(project_dir: Path, build_name: str) -> Netlist:
 
 # ---------------------------------------------------------------- addresses
 
+# A part is marked do-not-populate in Python with the extra field DNP=True
+# (e.g. `Component(..., DNP=True)`). The flag travels in the circuit JSON
+# like the sourcing fields do; it is not copied to the board as a text field
+# but becomes the footprint's DNP attribute (see sync_pcb).
+DNP_FIELD = "DNP"
+
+
+def is_dnp(fields: dict | None) -> bool:
+    """True if a component's extra fields mark it do-not-populate."""
+    value = (fields or {}).get(DNP_FIELD)
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1", "dnp")
+    return bool(value)
+
+
 def load_fields(project_dir: Path, build_name: str) -> dict[str, dict[str, str]]:
     """ref -> extra fields (address, Manufacturer, Partnumber, DigiKey, ...).
 
@@ -181,10 +196,26 @@ def load_fields(project_dir: Path, build_name: str) -> dict[str, dict[str, str]]
             extra = {
                 k: v
                 for k, v in (comp.get("_extra_fields") or {}).items()
-                if v and not k.startswith("ki_")
+                if v and not k.startswith("ki_") and k != DNP_FIELD
             }
             if extra:
                 out[ref] = extra
+        for sub in circuit.get("subcircuits", []):
+            walk(sub)
+
+    walk(data)
+    return out
+
+
+def load_dnp(project_dir: Path, build_name: str) -> set[str]:
+    """Refs of the components marked do-not-populate in the circuit JSON."""
+    data = json.loads((project_dir / f"{build_name}.json").read_text())
+    out: set[str] = set()
+
+    def walk(circuit: dict) -> None:
+        for ref, comp in circuit.get("components", {}).items():
+            if is_dnp(comp.get("_extra_fields")):
+                out.add(ref)
         for sub in circuit.get("subcircuits", []):
             walk(sub)
 

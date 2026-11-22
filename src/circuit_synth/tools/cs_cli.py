@@ -86,7 +86,9 @@ def pcb_sync(project_dir: str, build_name: str) -> None:
     """Create/update the .kicad_pcb from the generated schematic.
 
     Adds/removes/swaps footprints, assigns pad nets, copies part fields,
-    normalizes 3D model paths. Placement and routing are preserved.
+    normalizes 3D model paths. Placement and routing are preserved. Parts
+    marked DNP=True in Python keep their footprint and get pcbnew's "Do not
+    populate" attribute.
     """
     _pcb_script("sync_pcb.py", [str(Path(project_dir).resolve()), build_name])
 
@@ -118,7 +120,9 @@ def pcb_fab(project_dir: str, build_name: str, zip_path: str) -> None:
     X2 gerbers (all layers), drill + map, position CSV, IPC-2581 with
     MPN/MFR/DigiKey columns, the BOM CSV, and the ECAD sources
     (board/project/rules). Aborts on DRC errors and warns on
-    paste/fiducial/MPN issues the assembler would flag.
+    paste/fiducial/MPN issues the assembler would flag. Do-not-populate
+    parts are left out of the position file and the BOM, flagged in the
+    IPC-2581, and listed in <build>-dnp.csv.
     """
     from circuit_synth.manufacturing.bom_csv import export as bom_export_fn
 
@@ -251,7 +255,10 @@ def bom() -> None:
 @click.argument("project_dir", type=click.Path(exists=True, file_okay=False))
 @click.argument("build_name")
 def bom_export(project_dir: str, build_name: str) -> None:
-    """Write <build>.bom.csv from the build's canonical circuit JSON."""
+    """Write <build>.bom.csv from the build's canonical circuit JSON.
+
+    Parts with no MPN and parts marked DNP=True are left out.
+    """
     from circuit_synth.manufacturing.bom_csv import export
 
     export(Path(project_dir).resolve(), build_name)

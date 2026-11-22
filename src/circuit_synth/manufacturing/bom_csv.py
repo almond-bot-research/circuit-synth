@@ -13,7 +13,9 @@ libraries either, whose imported symbols and footprints name whatever part
 their geometry was drawn from.
 
 Groups with no MPN (fiducials, silkscreen logos) are dropped: there is
-nothing to buy for them.
+nothing to buy for them. Parts marked do-not-populate (`DNP=True` in Python)
+are left out too and listed on the console, so the CSV is exactly what gets
+bought and placed.
 
 Usage:
   cs bom export <project_dir> <build_name>
@@ -25,6 +27,8 @@ import csv
 import json
 import re
 from pathlib import Path
+
+from circuit_synth.pcb.scripts.kicadpcb import is_dnp
 
 COLUMNS = ["Refs", "Qty", "Value", "Package", "Manufacturer", "MPN", "DigiKey", "LCSC"]
 
@@ -51,8 +55,12 @@ def export(project_dir: Path, build_name: str) -> Path:
 
     groups: dict[tuple[str, str], dict] = {}
     dropped: list[str] = []
+    dnp: list[str] = []
     for ref, comp in components(circuit).items():
         fields = comp.get("_extra_fields") or {}
+        if is_dnp(fields):
+            dnp.append(ref)
+            continue
         mpn = fields.get("Partnumber", "")
         if not mpn:
             dropped.append(ref)
@@ -91,4 +99,6 @@ def export(project_dir: Path, build_name: str) -> Path:
     print(f"[{build_name}] bom: {len(rows)} part numbers -> {out}")
     if dropped:
         print(f"  no MPN, omitted: {', '.join(sorted(dropped, key=ref_key))}")
+    if dnp:
+        print(f"  DNP, omitted: {', '.join(sorted(dnp, key=ref_key))}")
     return out

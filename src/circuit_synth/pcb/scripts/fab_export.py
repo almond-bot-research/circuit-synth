@@ -5,11 +5,17 @@ Writes <layout_dir>/fab/ in the layout the assembly house asks for
 
 - gerbers/: X2 gerbers for every copper layer plus mask, paste,
   silkscreen, and edge cuts, and the Excellon drill with a gerber map
-- <build>-pos.csv: placement for every footprint, fiducials and THT
-  parts included
+- <build>-pos.csv: placement for every populated footprint, fiducials
+  and THT parts included
 - <build>.xml: IPC-2581 with Manufacturer/MPN/DigiKey BOM columns read
   off the footprint fields (stamped by `cs pcb sync` from parts.py)
 - <build>.bom.csv: copied from the layout dir (`cs bom export` runs it)
+- <build>-dnp.csv: the do-not-populate parts, when there are any
+
+Do-not-populate parts (`DNP=True` in Python, pcbnew's DNP attribute on
+the board) keep their copper, mask and silkscreen but are left out of the
+position file and the BOM CSV, and carry KiCad's DNP flag in the
+IPC-2581. The DNP list spells that out for the assembler.
 - <build>.kicad_pcb/.kicad_pro/.kicad_dru: the ECAD source, listed as
   "optional but helpful" on the assembler's constraints page
 
@@ -28,6 +34,7 @@ as warnings so a deliberate exception doesn't block an order.
 
 from __future__ import annotations
 
+import csv
 import json
 import subprocess
 import sys
@@ -197,6 +204,16 @@ def preflight(board, board_path: Path) -> list[str]:
         if tht and smd and not all(has_paste(p) for p in tht):
             warnings.append(f"{fp.GetReference()}: mixed SMT+THT part missing paste on THT pads")
 
+        if fp.IsDNP():
+            # Nothing to buy or place; the stencil is the only thing left
+            # that still treats the part as populated.
+            if any(has_paste(p) for p in smd):
+                warnings.append(
+                    f"{fp.GetReference()}: DNP part still has paste apertures "
+                    f"(its pads will be printed with paste)"
+                )
+            continue
+
         field = fp.GetFieldByName("Partnumber")
         if pads and (field is None or not field.GetText()):
             warnings.append(f"{fp.GetReference()}: no Partnumber (fine for TPs/mounting holes)")
@@ -204,6 +221,43 @@ def preflight(board, board_path: Path) -> list[str]:
     if fiducials < 3:
         warnings.append(f"only {fiducials} fiducials; the assembler wants at least 3")
     return warnings
+
+
+def _ref_key(ref: str) -> tuple[str, int]:
+    head = ref.rstrip("0123456789")
+    return (head, int(ref[len(head):] or 0))
+
+
+def write_dnp_list(board, path: Path) -> list[str]:
+    """Write the do-not-populate list (or remove a stale one); return the refs."""
+    rows = []
+    for fp in board.GetFootprints():
+        if not fp.IsDNP():
+            continue
+
+        def text(name: str) -> str:
+            field = fp.GetFieldByName(name)
+            return field.GetText() if field is not None else ""
+
+        rows.append(
+            {
+                "Ref": fp.GetReference(),
+                "Value": fp.GetValue(),
+                "Package": fp.GetFPID().GetLibItemName().wx_str(),
+                "Manufacturer": text("Manufacturer"),
+                "MPN": text("Partnumber"),
+                "Note": "DNP - do not populate",
+            }
+        )
+    rows.sort(key=lambda r: _ref_key(r["Ref"]))
+    if not rows:
+        path.unlink(missing_ok=True)
+        return []
+    with path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return [r["Ref"] for r in rows]
 
 
 def export(project_dir: Path, build_name: str, zip_path: str) -> int:
@@ -232,11 +286,16 @@ def export(project_dir: Path, build_name: str, zip_path: str) -> int:
     run_cli("pcb", "export", "drill", str(board_path),
             "-o", f"{gerbers}/", "--generate-map", "--map-format", "gerberx2")
     run_cli("pcb", "export", "pos", str(board_path),
-            "-o", str(fab / f"{build_name}-pos.csv"), "--format", "csv", "--units", "mm")
+            "-o", str(fab / f"{build_name}-pos.csv"), "--format", "csv", "--units", "mm",
+            "--exclude-dnp")
     run_cli("pcb", "export", "ipc2581", str(board_path),
             "-o", str(fab / f"{build_name}.xml"),
             "--bom-col-mfg-pn", "Partnumber", "--bom-col-mfg", "Manufacturer",
             "--bom-col-dist-pn", "DigiKey", "--bom-col-dist", "DigiKey")
+
+    dnp = write_dnp_list(board, fab / f"{build_name}-dnp.csv")
+    if dnp:
+        print(f"  DNP (not in the BOM or position file): {', '.join(dnp)}")
 
     bom = project_dir / f"{build_name}.bom.csv"
     if bom.exists():

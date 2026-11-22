@@ -11,6 +11,11 @@ the schematic - is what the IPC-2581 fab export reads them from. Footprint
 3D model paths are normalized to stable references (models live next to
 their footprints; see kicadpcb.normalize_models).
 
+A part marked `DNP=True` in Python keeps its footprint (the pads, courtyard
+and silkscreen stay, so the same board can be built populated or not) and
+gets pcbnew's "Do not populate" attribute, which the fab exports use to
+leave it out of the position file and flag it in the IPC-2581 BOM.
+
 Every sync also stamps the fab's capabilities onto the project: board setup
 constraints in the .kicad_pro and a .kicad_dru with the same-net via
 stitching exception (see fab_rules). It also stamps the standard net classes
@@ -39,6 +44,7 @@ from kicadpcb import (  # noqa: E402
     fp_lib_paths,
     heal_copper_nets,
     load_addresses,
+    load_dnp,
     load_fields,
     normalize_models,
     place_staging,
@@ -73,6 +79,7 @@ def sync(project_dir: Path, build_name: str) -> None:
     pcb_path = project_dir / f"{build_name}.kicad_pcb"
     netlist = export_netlist(project_dir, build_name)
     fields = load_fields(project_dir, build_name)
+    dnp_refs = load_dnp(project_dir, build_name)
     libs = fp_lib_paths(project_dir)
 
     new_board = not pcb_path.exists()
@@ -185,6 +192,10 @@ def sync(project_dir: Path, build_name: str) -> None:
             fp.SetValue(netlist.values[ref])
         if netlist.paths.get(ref):
             fp.SetPath(pcbnew.KIID_PATH(netlist.paths[ref]))
+        # Set in both directions, so dropping DNP=True in Python populates
+        # the part again.
+        if fp.IsDNP() != (ref in dnp_refs):
+            fp.SetDNP(ref in dnp_refs)
 
     assign_nets(board, netlist)
     healed = heal_copper_nets(board)
@@ -204,6 +215,8 @@ def sync(project_dir: Path, build_name: str) -> None:
         print(f"  added (staged below board): {', '.join(added)}")
     if swapped:
         print(f"  footprint swapped: {', '.join(swapped)}")
+    if dnp_refs:
+        print(f"  DNP (footprint kept, not populated): {', '.join(sorted(dnp_refs))}")
     for note in healed:
         print(f"  {note}")
     if remodeled:

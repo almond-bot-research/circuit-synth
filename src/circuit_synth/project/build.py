@@ -19,7 +19,7 @@ from circuit_synth import Circuit
 from circuit_synth.library import ENV_VAR as _LIB_ENV
 from circuit_synth.library import ensure_env, footprint_lib_dirs, library_root
 from circuit_synth.pcb.scripts.design_rules import apply_net_classes, unmatched_patterns
-from circuit_synth.pcb.scripts.kicadpcb import find_kicad_cli
+from circuit_synth.pcb.scripts.kicadpcb import find_kicad_cli, is_dnp
 
 from .address import existing_refs, finalize_design
 from .schematic_labels import compute_global_nets, parse_spans, rewrite_labels
@@ -229,6 +229,70 @@ def _sync_footprints(project_dir: Path, build_name: str) -> None:
             path.write_text(text)
 
 
+_FLAG_RE = {
+    flag: re.compile(r"(\(" + flag + r"\s+)(yes|no)(\s*\))") for flag in ("dnp", "in_bom", "on_board")
+}
+
+
+def _sync_dnp(project_dir: Path, build_name: str) -> list[str]:
+    """Set each symbol instance's "do not populate" flag from the circuit JSON.
+
+    A part marked `DNP=True` in Python gets `(dnp yes)` and stays in the BOM
+    and on the board (`in_bom yes`, `on_board yes`): KiCad then draws it
+    crossed out, the exported netlist still carries it, and `cs pcb sync`
+    keeps its footprint with the DNP attribute. Every other symbol is set
+    back to `(dnp no)`, so removing the flag in Python populates the part
+    again. Returns the DNP references.
+    """
+    circuit_json = json.loads((project_dir / f"{build_name}.json").read_text())
+
+    scopes: dict[str, dict[str, bool]] = {}
+
+    def collect(circ: dict) -> None:
+        comps = circ.get("components", {})
+        if isinstance(comps, dict):
+            comps = [{"ref": ref, **info} for ref, info in comps.items()]
+        scopes[circ["name"]] = {c["ref"]: is_dnp(c.get("_extra_fields")) for c in comps}
+        for sub in circ.get("subcircuits", []):
+            collect(sub)
+
+    collect(circuit_json)
+
+    marked: list[str] = []
+    for name, flags in scopes.items():
+        marked += [ref for ref, dnp in flags.items() if dnp]
+        path = project_dir / f"{name}.kicad_sch"
+        if not path.exists() or not flags:
+            continue
+        text = path.read_text()
+        tree = parse_spans(text)
+        symbols = [n for n in tree if isinstance(n, list) and n and n[0] == "symbol"]
+        changed = False
+        for sym in reversed(symbols):  # back-to-front keeps earlier spans valid
+            props = {p[1]: p[2] for p in sym if isinstance(p, list) and p and p[0] == "property" and len(p) > 2}
+            dnp = flags.get(props.get("Reference"))
+            if dnp is None:
+                continue
+            start, end = sym.span
+            # The flags sit ahead of the first property; stop there so a
+            # nested token further down can never be touched.
+            head_end = text.find("(property", start, end)
+            head_end = end if head_end < 0 else head_end
+            head = text[start:head_end]
+            want = {"dnp": "yes" if dnp else "no"}
+            if dnp:
+                want.update(in_bom="yes", on_board="yes")
+            new_head = head
+            for flag, value in want.items():
+                new_head = _FLAG_RE[flag].sub(lambda m, v=value: m.group(1) + v + m.group(3), new_head, count=1)
+            if new_head != head:
+                text = text[:start] + new_head + text[head_end:]
+                changed = True
+        if changed:
+            path.write_text(text)
+    return sorted(marked)
+
+
 def _export_netlist(project_dir: Path, build_name: str) -> None:
     """Export <build>.net from the generated schematic with kicad-cli.
 
@@ -305,6 +369,7 @@ def build_project(
     for sch in out.glob("*.kicad_sch"):
         _canonicalize_numbers(sch)
     _sync_footprints(out, build_name)
+    dnp_refs = _sync_dnp(out, build_name)
     rewrite_labels(out, build_name, global_nets)
     _lib_tables(out, list(parts_dirs))
     # Before the netlist export, which records each net's class
@@ -315,5 +380,7 @@ def build_project(
     for pattern in unmatched_patterns(netclasses or {}, out / f"{build_name}.net"):
         print(f"[{build_name}] warning: net-class pattern matches no net: {pattern}")
 
+    if dnp_refs:
+        print(f"[{build_name}] DNP (not populated): {', '.join(dnp_refs)}")
     print(f"[{build_name}] {len(addressed)} addressed components -> {out}")
     return out

@@ -192,6 +192,32 @@ def test_w5500_udp_round_trip_and_arp_timeout():
     assert r(1, wiz.SN_IR, 1)[0] & wiz.IR_TIMEOUT and chip.violations == []
 
 
+def test_w5500_reset_pin():
+    clock = Clock()
+    chip = wiz.W5500(clock, wiz.Network())
+
+    def version():
+        return chip.spi(bytes([0, wiz.VERSIONR, 0]), None, 1)
+
+    assert version() == b"\x04"
+    chip.hang()
+    assert version() == b"\x00"
+    chip.spi(
+        bytes([0, wiz.MR, 4]), b"\x80", 1
+    )  # a software reset cannot reach a deaf chip
+    assert version() == b"\x00"
+    chip.set_rstn(0)
+    clock.advance(600)
+    chip.set_rstn(1)
+    assert version() == b"\x00" and "PLL" in chip.violations.pop()  # too early
+    clock.advance(1000)
+    assert version() == b"\x04" and chip.hardware_resets == 1 and chip.violations == []
+    chip.set_rstn(0)
+    clock.advance(100)
+    chip.set_rstn(1)
+    assert "500us" in chip.violations[-1]
+
+
 # --- netlist and pin map ----------------------------------------------------------------
 @pytest.fixture
 def board(tmp_path):

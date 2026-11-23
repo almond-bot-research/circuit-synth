@@ -17,6 +17,9 @@ writing ad-hoc scripts:
   cs parts import <LCSC_ID>            onboard a part (symbol/footprint/3D/datasheet)
   cs parts model <part_dir> --from ... install a manufacturer 3D model into a part
   cs parts min-symbol                  generate a minimal box symbol
+  cs sim run <design_or_fw_dir>        run firmware simulation suites (firmware on Linux vs part models)
+  cs sim pinmap <header> <netlist>     check firmware pin macros against the netlist
+  cs sim parts | csrc                  list part models / locate the C simulation runtime
   cs docs snapshot                     snapshot a web page to markdown
   cs setup-kicad                       register ${CIRCUIT_SYNTH_LIB} for the KiCad GUI
   cs kicad-py                          run any script under a pcbnew-capable Python
@@ -293,6 +296,73 @@ def bom_verify(builds: tuple[str, ...], only: str | None, low_stock: int) -> Non
         raise SystemExit("BUILDS must be <project_dir> <build_name> pairs")
     pairs = [(Path(builds[i]), builds[i + 1]) for i in range(0, len(builds), 2)]
     sys.exit(verify(pairs, only=only, low_stock=low_stock))
+
+
+# ---------------------------------------------------------------------- sim
+
+@cli.group()
+def sim() -> None:
+    """Firmware-in-the-loop simulation (docs/FIRMWARE_SIM.md)."""
+
+
+@sim.command("run")
+@click.argument("path", type=click.Path(exists=True, file_okay=False))
+@click.option("-k", "pattern", default=None, help="Only tests matching this substring.")
+@click.option("-v", "verbose", is_flag=True, help="List every test.")
+@click.option("--no-build", is_flag=True, help="Skip `make sim`.")
+def sim_run(path: str, pattern: str | None, verbose: bool, no_build: bool) -> None:
+    """Build and run the simulation suites in PATH (a firmware or design directory)."""
+    from circuit_synth.fwsim import runner
+
+    suites = runner.find_suites(path)
+    if not suites:
+        raise SystemExit(f"no simulation suite (a tests/ directory with test_*.py) in {path}")
+    failed = 0
+    for suite in suites:
+        click.echo(f"== {suite}")
+        failed += runner.run_suite(suite, pattern, verbose, build=not no_build) != 0
+    sys.exit(1 if failed else 0)
+
+
+@sim.command("pinmap")
+@click.argument("header", type=click.Path(exists=True, dir_okay=False))
+@click.argument("netlist", type=click.Path(exists=True, dir_okay=False))
+@click.option("--mcu", required=True, help="Text in the MCU's value in the netlist, e.g. RP2354.")
+@click.option("--prefix", default="PIN_", show_default=True, help="Pin macros are <prefix><net name>.")
+@click.option("--unused", default=None, help="Macro listing the GPIOs the firmware treats as unconnected.")
+def sim_pinmap(header: str, netlist: str, mcu: str, prefix: str, unused: str | None) -> None:
+    """Check a firmware header's pin macros against the MCU's nets in a KiCad netlist."""
+    from circuit_synth.fwsim import pinmap
+    from circuit_synth.fwsim.netlist import Board
+
+    board = Board(netlist)
+    _, gpio_net = pinmap.mcu_gpio_nets(board, mcu)
+    unused_set = pinmap.header_int_list(header, unused) if unused else None
+    if unused and unused_set is None:
+        raise SystemExit(f"{header} has no #define {unused} {{ ... }}")
+    problems = pinmap.check_pin_macros(pinmap.header_defines(header), gpio_net, prefix=prefix, unused=unused_set)
+    for p in problems:
+        click.echo(p)
+    connected = sum(1 for n in gpio_net.values() if not Board.unconnected(n))
+    click.echo(f"{connected} MCU nets checked, {len(problems)} problem(s)")
+    sys.exit(1 if problems else 0)
+
+
+@sim.command("parts")
+def sim_parts() -> None:
+    """List the device models that ship with circuit-synth."""
+    from circuit_synth.fwsim.parts import MODELS
+
+    for name, text in MODELS.items():
+        click.echo(f"{name:12} {text}")
+
+
+@sim.command("csrc")
+def sim_csrc() -> None:
+    """Print the directory of the C simulation runtime (cs_sim.h / cs_sim.c)."""
+    from circuit_synth.fwsim import CSRC_DIR
+
+    click.echo(str(CSRC_DIR))
 
 
 # -------------------------------------------------------------------- parts

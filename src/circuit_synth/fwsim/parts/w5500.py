@@ -15,7 +15,10 @@ Modelled
 - ARP as far as the host can see it: a SEND to an address that does not
   answer ends in Sn_IR.TIMEOUT after RTR x (RCR + 1);
 - received datagrams with the 8-byte header (peer IP, port, length) the
-  chip puts in front of the payload.
+  chip puts in front of the payload;
+- the RSTn pin (5.5.1): held low for at least 500us it resets the chip; the
+  chip then needs 1ms (PLL lock) before it answers on SPI.  `hang()` makes
+  the chip deaf on SPI until such a reset, for recovery tests.
 
 Not modelled: TCP, MACRAW, PPPoE, the PHY itself (auto-negotiation is a
 delay), fragmentation, Ethernet framing, ICMP, real ARP traffic.
@@ -207,6 +210,11 @@ class W5500:
         self.tx_datagrams = 0
         self.rx_dropped = 0
         self.arp_requests = 0
+        self.rstn = 1
+        self.hung = False
+        self.hardware_resets = 0
+        self._rst_low_since = 0.0
+        self._ready_at = 0.0
         self.hardware_reset()
 
     # ------------------------------------------------------------------
@@ -217,6 +225,31 @@ class W5500:
         """Power-on (RC on RSTn): registers at defaults, PHY restarts."""
         self._reset_registers()
         self._phy_restart()
+
+    # --- RSTn pin (5.5.1: TRC 500us minimum, TPL 1ms maximum) -----------------
+    def set_rstn(self, level: int):
+        level = 1 if level else 0
+        if level == self.rstn:
+            return
+        self.rstn = level
+        if level == 0:
+            self._rst_low_since = self.clock.now
+            self.link = False
+            self._phy_epoch += 1
+            return
+        if self.clock.now - self._rst_low_since < 500:
+            self._violation("RSTn low for less than 500us")
+        self.hung = False
+        self.hardware_resets += 1
+        self.hardware_reset()
+        self._ready_at = self.clock.now + 1000
+
+    def hang(self):
+        """Fault injection: the chip stops answering on SPI (latch-up, a
+        corrupted state machine).  Only a hardware reset brings it back."""
+        self.hung = True
+        self.link = False
+        self._phy_epoch += 1
 
     def _reset_registers(self):
         self.common = bytearray(0x40)
@@ -285,6 +318,13 @@ class W5500:
         """One frame, SCSn low to SCSn high.  Returns the bytes read."""
         self.spi_frames += 1
         self.spi_bytes += len(hdr) + length
+        if self.rstn == 0 or self.hung:
+            return bytes(length)  # in reset, or deaf: MISO stays low, writes are lost
+        if self.clock.now < self._ready_at:
+            self._violation(
+                "SPI access less than 1ms after RSTn was released (PLL not locked)"
+            )
+            return bytes(length)
         if len(hdr) != 3:
             self._violation(f"SPI frame header of {len(hdr)} bytes")
             return bytes(length)
@@ -520,7 +560,7 @@ class W5500:
     def udp_in(
         self, src_ip: int, src_port: int, dst_ip: int, dst_port: int, payload: bytes
     ):
-        if not self.link:
+        if not self.link or self.hung or self.rstn == 0:
             return
         broadcast = dst_ip in (BROADCAST, self.subnet_broadcast())
         if not broadcast and dst_ip != self.sipr:

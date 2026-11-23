@@ -164,6 +164,8 @@ where = ["src"]
 [tool.setuptools.package-data]
 circuit_synth = [
     "py.typed",
+    # C runtime for firmware simulation (cs sim csrc)
+    "fwsim/csrc/*",
     "data/templates/project/*",
     "data/templates/claude/*",
     # Include circuit template files (CRITICAL: needed for cs-new-project)

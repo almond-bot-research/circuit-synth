@@ -19,11 +19,19 @@ from circuit_synth.pcb.scripts import design_rules
 from circuit_synth.pcb.scripts.design_rules import (
     PART_DRU_NAME,
     STANDARD_NET_CLASSES,
+    NetRules,
     append_dru_rules,
+    apply_net_class_rules,
     apply_net_classes,
+    board_setup_path,
+    layer_kind,
+    load_board_setup,
+    net_class,
+    net_class_layer_rules,
     parse_dru_rules,
     part_dru_rules,
     unmatched_patterns,
+    write_board_setup,
 )
 
 LM74502_RULE = """\
@@ -312,3 +320,307 @@ def test_existing_board_gets_tht_rule_appended(tmp_path, fab_rules):
         "same-net hole to hole", "via-via copper spacing", THT_RULE
     ]
     assert fab_rules.apply_fab_rules(tmp_path, "default") == []
+
+
+# ------------------------------------------------------------ a design's own net classes
+
+# The thor carrier's impedance classes: one geometry on the outer layers,
+# another on the inner signal layers (In2 / In7).
+GMSL = dict(track_width=0.18, layers={"inner": {"track_width": 0.11}})
+USB3 = dict(diff_pair_width=0.19, diff_pair_gap=0.15, diff_pair_via_gap=0.3,
+            layers={"inner": {"diff_pair_width": 0.13}})
+
+
+def _defs():
+    return [net_class("GMSL_50R", **GMSL), net_class("USB3_85R", **USB3)]
+
+
+def test_net_class_fills_in_the_default_class_values():
+    cls = net_class("GMSL_50R", **GMSL)
+    default = STANDARD_NET_CLASSES[0]
+    assert cls["name"] == "GMSL_50R" and cls["priority"] == 0
+    assert cls["track_width"] == 0.18
+    for field in ("clearance", "via_diameter", "via_drill", "diff_pair_width", "diff_pair_gap"):
+        assert cls[field] == default[field]
+    assert cls["layers"] == {"inner": {"track_width": 0.11}}
+    # the same field set KiCad writes, plus the per-layer overrides
+    assert set(cls) == set(STOCK_DEFAULT) | {"layers"}
+    assert net_class("X")["layers"] == {}
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    (dict(layers={"top": {"track_width": 0.1}}), "layer scope 'top'"),
+    (dict(layers={"In0.Cu": {"track_width": 0.1}}), "layer scope"),
+    (dict(layers={"inner": {"via_diameter": 0.4}}), "via_diameter cannot be set per layer"),
+])
+def test_net_class_rejects_bad_layer_overrides(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        net_class("X", **kwargs)
+
+
+def test_net_class_name_must_be_usable_in_a_rule_condition():
+    for name in ("", "it's", 'a"b'):
+        with pytest.raises(ValueError):
+            net_class(name)
+
+
+def test_declared_classes_are_stamped_without_their_layer_overrides(tmp_path):
+    pro = _pro(tmp_path, {"classes": list(STANDARD_NET_CLASSES)})
+    notes = apply_net_classes(pro, {"USB3_85R": ["UPHY_*"], "Power_5V": ["VBUS"]}, _defs())
+    assert notes == [
+        f"net classes added to {pro.name}: GMSL_50R, USB3_85R",
+        f"net-class assignments written to {pro.name}: 2 pattern(s)",
+    ]
+    classes = _classes(pro)
+    assert list(classes) == ["Default", "Power_24V", "Power_24V_SRC", "Power_5V", "GMSL_50R", "USB3_85R"]
+    assert classes["USB3_85R"]["diff_pair_width"] == 0.19 and classes["USB3_85R"]["diff_pair_via_gap"] == 0.3
+    assert all(set(c) == set(STOCK_DEFAULT) for c in classes.values())   # no "layers" key in KiCad's file
+    assert apply_net_classes(pro, {"USB3_85R": ["UPHY_*"], "Power_5V": ["VBUS"]}, _defs()) == []
+
+
+def test_declared_class_follows_python_and_may_replace_a_standard_one(tmp_path):
+    pro = _pro(tmp_path, {"classes": list(STANDARD_NET_CLASSES)})
+    apply_net_classes(pro, defs=_defs())
+    changed = [net_class("GMSL_50R", track_width=0.2), net_class("Default", clearance=0.1)]
+    assert apply_net_classes(pro, defs=changed) == [
+        f"net classes updated from the design in {pro.name}: Default, GMSL_50R"
+    ]
+    assert _classes(pro)["GMSL_50R"]["track_width"] == 0.2
+    assert _classes(pro)["Default"]["clearance"] == 0.1
+    assert _classes(pro)["USB3_85R"]["diff_pair_width"] == 0.19   # no longer declared: left alone
+    # without the declaration (a sync that knows nothing of it) Default is standard again
+    assert apply_net_classes(pro) == [f"net classes reset to standard values in {pro.name}: Default"]
+
+
+# ------------------------------------------------------------ net-class resolution
+
+def _rules():
+    patterns = [
+        {"netclass": "GMSL_50R", "pattern": "/gmsl_?/COAX_?"},
+        {"netclass": "USB3_85R", "pattern": "UPHY_*"},
+        {"netclass": "Power_5V", "pattern": "V5V*"},
+    ]
+    return NetRules(STANDARD_NET_CLASSES, patterns, _defs())
+
+
+def test_a_net_resolves_to_the_class_its_full_name_matches():
+    rules = _rules()
+    assert rules.class_of("/gmsl_a/COAX_A") == "GMSL_50R"
+    assert rules.class_of("gmsl_a/COAX_A") == "Default"      # the hierarchical "/" is part of the name
+    assert rules.class_of("UPHY_RX1_P") == "USB3_85R"
+    assert rules.class_of("V5V_USB") == "Power_5V"
+    assert rules.class_of("SPI_SCK") == "Default"
+    assert rules.classes_of("UPHY_RX1_P") == ["USB3_85R", "Default"]
+
+
+def test_width_follows_the_layer():
+    rules = _rules()
+    coax, usb = "/gmsl_a/COAX_A", "UPHY_RX1_P"
+    assert layer_kind("F.Cu") == layer_kind("B.Cu") == "outer" and layer_kind("In7.Cu") == "inner"
+    assert rules.value(coax, "track_width", "F.Cu") == 0.18
+    assert rules.value(coax, "track_width", "B.Cu") == 0.18
+    assert rules.value(coax, "track_width", "In7.Cu") == 0.11
+    assert rules.value(coax, "track_width") == 0.18                  # no layer: the class value
+    assert rules.value(usb, "diff_pair_width", "F.Cu") == 0.19
+    assert rules.value(usb, "diff_pair_width", "In2.Cu") == 0.13
+    assert rules.value(usb, "diff_pair_gap", "In2.Cu") == 0.15       # not overridden: the class value
+    assert rules.value(usb, "diff_pair_via_gap") == 0.3
+    assert (rules.value(usb, "via_diameter"), rules.value(usb, "via_drill")) == (0.6, 0.3)
+    # nets outside the declared classes get their (standard) class's values on every layer
+    assert rules.value("V5V_USB", "track_width", "In2.Cu") == 0.3
+    assert rules.value("SPI_SCK", "track_width", "In2.Cu") == 0.2
+    with pytest.raises(KeyError):
+        rules.value(usb, "no_such_field")
+
+
+def test_a_layer_name_override_beats_outer_and_inner():
+    cls = net_class("Z", track_width=0.2, layers={
+        "outer": {"track_width": 0.18}, "inner": {"track_width": 0.11}, "In2.Cu": {"track_width": 0.12},
+        "F.Cu": {"track_width": 0.17},
+    })
+    rules = NetRules([], [{"netclass": "Z", "pattern": "*"}], [cls])
+    assert [rules.value("N", "track_width", layer) for layer in ("F.Cu", "B.Cu", "In1.Cu", "In2.Cu")] == [
+        0.17, 0.18, 0.11, 0.12
+    ]
+
+
+def test_priority_then_name_decides_between_matching_classes():
+    low = net_class("A_LOW", track_width=0.5, priority=3)
+    high = net_class("B_HIGH", track_width=0.25, priority=1)
+    tie = net_class("A_TIE", track_width=0.4, priority=1)
+    patterns = [{"netclass": c, "pattern": "CLK*"} for c in ("A_LOW", "B_HIGH")]
+    rules = NetRules([], patterns, [low, high])
+    assert rules.classes_of("CLK0") == ["B_HIGH", "A_LOW", "Default"]
+    assert rules.value("CLK0", "track_width", "F.Cu") == 0.25
+    rules = NetRules([], [*patterns, {"netclass": "A_TIE", "pattern": "CLK0"}], [low, high, tie])
+    assert rules.class_of("CLK0") == "A_TIE"                 # same priority: by name, as KiCad sorts them
+
+
+def test_class_without_a_field_falls_through_to_the_next_class():
+    # a class made in KiCad's GUI only carries the fields set there
+    partial = {"name": "HV", "clearance": 0.6, "priority": 0}
+    rules = NetRules([*STANDARD_NET_CLASSES, partial], [{"netclass": "HV", "pattern": "HV*"},
+                                                        {"netclass": "Undefined", "pattern": "HV*"}])
+    assert rules.class_of("HV_BUS") == "HV"                  # a pattern for a class that does not exist is ignored
+    assert rules.value("HV_BUS", "clearance") == 0.6
+    assert rules.value("HV_BUS", "track_width", "F.Cu") == 0.2    # from Default
+    assert not rules.declared
+
+
+def test_net_rules_load_from_the_project_files(tmp_path):
+    assert NetRules.load(tmp_path, "default").class_of("ANY") == "Default"   # no files at all
+    pro = _pro(tmp_path, {})
+    apply_net_classes(pro, {"GMSL_50R": ["/gmsl_?/COAX_?"]}, _defs())
+    rules = NetRules.load(tmp_path, "default")
+    assert rules.class_of("/gmsl_b/COAX_D") == "GMSL_50R" and not rules.declared
+    assert rules.value("/gmsl_b/COAX_D", "track_width", "In7.Cu") == 0.18    # overrides not known yet
+    write_board_setup(tmp_path, "default", {"net_classes": _defs()})
+    rules = NetRules.load(tmp_path, "default")
+    assert set(rules.declared) == {"GMSL_50R", "USB3_85R"}
+    assert rules.value("/gmsl_b/COAX_D", "track_width", "In7.Cu") == 0.11
+
+
+# ------------------------------------------------------------ board-setup file
+
+def test_board_setup_file_round_trip(tmp_path):
+    path = board_setup_path(tmp_path, "default")
+    assert path.name == "default.board_setup.json"
+    assert load_board_setup(tmp_path, "default") == {}
+    assert write_board_setup(tmp_path, "default", {"copper_layers": None, "stackup": None, "net_classes": []}) == []
+    assert not path.exists()                                  # a design that declares nothing gets no file
+    setup = {"copper_layers": 10, "stackup": None, "net_classes": _defs()}
+    assert write_board_setup(tmp_path, "default", setup) == [
+        f"board setup written to {path.name}: copper_layers, net_classes"
+    ]
+    assert load_board_setup(tmp_path, "default") == {"copper_layers": 10, "net_classes": _defs()}
+    assert write_board_setup(tmp_path, "default", setup) == []
+    assert write_board_setup(tmp_path, "default", {"net_classes": []}) == [
+        f"removed {path.name} (the design declares no board setup)"
+    ]
+    assert not path.exists()
+
+
+# ------------------------------------------------------------ per-layer rules
+
+def test_layer_rules_state_every_value_in_effect_on_the_layer():
+    rules = dict(net_class_layer_rules(_defs()))
+    assert list(rules) == [
+        "net class GMSL_50R: inner", "net class GMSL_50R: inner pair",
+        "net class USB3_85R: inner", "net class USB3_85R: inner pair",
+    ]
+    assert rules["net class GMSL_50R: inner"].endswith(
+        '(rule "net class GMSL_50R: inner"\n'
+        "  (layer inner)\n"
+        "  (condition \"A.hasNetclass('GMSL_50R')\")\n"
+        "  (constraint track_width (opt 0.11mm)))\n"
+    )
+    assert rules["net class USB3_85R: inner pair"].endswith(
+        '(rule "net class USB3_85R: inner pair"\n'
+        "  (layer inner)\n"
+        "  (condition \"A.hasNetclass('USB3_85R') && A.inDiffPair('*')\")\n"
+        "  (constraint track_width (opt 0.13mm))\n"
+        "  (constraint diff_pair_gap (opt 0.15mm)))\n"
+    )
+    # a class's single-ended width is not overridden on the inner layers, but
+    # its rule still says so, and comes before the pair rule (the last match wins)
+    assert "(constraint track_width (opt 0.2mm))" in rules["net class USB3_85R: inner"]
+    # every generated rule is a parseable rule carrying the marker comment
+    for name, text in rules.items():
+        assert parse_dru_rules(text) == [(name, text)]
+        assert text.startswith("# Generated from the design's netclass_defs")
+    assert net_class_layer_rules([net_class("PLAIN", track_width=0.3)]) == []
+
+
+def test_layer_rules_order_named_layers_after_outer_and_inner():
+    cls = net_class("Z", layers={
+        "In7.Cu": {"track_width": 0.12}, "B.Cu": {"track_width": 0.3}, "inner": {"track_width": 0.11},
+        "F.Cu": {"clearance": 0.25}, "outer": {"track_width": 0.18}, "In2.Cu": {"track_width": 0.1},
+    })
+    rules = net_class_layer_rules([cls])
+    assert [name for name, _ in rules if not name.endswith("pair")] == [
+        f"net class Z: {scope}" for scope in ("outer", "inner", "F.Cu", "In2.Cu", "In7.Cu", "B.Cu")
+    ]
+    by_name = dict(rules)
+    assert '(layer "In7.Cu")' in by_name["net class Z: In7.Cu"]
+    # F.Cu only overrides the clearance: its width is still the outer one
+    assert "(constraint track_width (opt 0.18mm))" in by_name["net class Z: F.Cu"]
+    assert "(constraint clearance (min 0.25mm))" in by_name["net class Z: F.Cu"]
+    assert "clearance" not in by_name["net class Z: outer"]
+
+
+def test_pair_gap_tighter_than_the_clearance_gets_its_own_rule():
+    cls = net_class("P2", clearance=0.2, diff_pair_gap=0.25, layers={"inner": {"diff_pair_gap": 0.1}})
+    rules = dict(net_class_layer_rules([cls]))
+    assert list(rules) == ["net class P2: inner", "net class P2: inner pair", "net class P2: inner pair gap"]
+    assert rules["net class P2: inner pair gap"].endswith(
+        '(rule "net class P2: inner pair gap"\n'
+        "  (layer inner)\n"
+        "  (condition \"A.hasNetclass('P2') && AB.isCoupledDiffPair()\")\n"
+        "  (constraint clearance (min 0.1mm)))\n"
+    )
+
+
+def test_layer_rules_are_written_below_the_header_and_follow_python(tmp_path):
+    dru = tmp_path / "default.kicad_dru"
+    existing = "(version 1)\n\n" + LM74502_RULE
+    dru.write_text(existing)
+    assert apply_net_class_rules(dru, []) == []
+    assert dru.read_text() == existing                       # nothing declared: not touched
+
+    assert apply_net_class_rules(dru, _defs()) == [f"per-layer net-class rules written to {dru.name}: 4"]
+    text = dru.read_text()
+    assert text.startswith("(version 1)\n\n# Generated from the design's netclass_defs")
+    # before the part rule, which KiCad therefore lets win
+    assert [name for name, _ in parse_dru_rules(text)] == [
+        "net class GMSL_50R: inner", "net class GMSL_50R: inner pair",
+        "net class USB3_85R: inner", "net class USB3_85R: inner pair", "LM74502 fine-pitch pins",
+    ]
+    assert text.endswith(LM74502_RULE)
+    assert apply_net_class_rules(dru, _defs()) == []         # idempotent
+    assert dru.read_text() == text
+
+    # a changed declaration replaces the rules instead of leaving the old ones
+    changed = [net_class("GMSL_50R", track_width=0.18, layers={"In7.Cu": {"track_width": 0.105}})]
+    assert apply_net_class_rules(dru, changed) == [f"per-layer net-class rules written to {dru.name}: 2"]
+    text = dru.read_text()
+    assert [name for name, _ in parse_dru_rules(text)] == [
+        "net class GMSL_50R: In7.Cu", "net class GMSL_50R: In7.Cu pair", "LM74502 fine-pitch pins",
+    ]
+    assert "0.105mm" in text and "USB3_85R" not in text
+
+    # and a declaration without per-layer values removes them, leaving the file as it was
+    assert apply_net_class_rules(dru, [net_class("GMSL_50R")]) == [
+        f"removed 2 generated net-class rule(s) from {dru.name}"
+    ]
+    assert dru.read_text() == existing
+
+
+def test_layer_rules_create_the_file_and_leave_hand_written_rules_alone(tmp_path):
+    dru = tmp_path / "default.kicad_dru"
+    assert apply_net_class_rules(dru, [net_class("PLAIN")]) == []
+    assert not dru.exists()
+    apply_net_class_rules(dru, _defs())
+    assert dru.read_text().startswith("(version 1)\n\n")
+    # a rule someone named like ours, but did not generate, is theirs
+    mine = '(rule "net class GMSL_50R: inner"\n  (constraint track_width (min 0.5mm)))\n'
+    dru.write_text("(version 1)\n\n# my own\n" + mine)
+    apply_net_class_rules(dru, [])
+    assert dru.read_text() == "(version 1)\n\n# my own\n" + mine
+
+
+def test_sync_stamps_declared_classes_and_layer_rules(tmp_path, fab_rules):
+    pro = _pro(tmp_path, {"classes": [dict(STOCK_DEFAULT)], "meta": {"version": 4},
+                          "netclass_patterns": [{"netclass": "USB3_85R", "pattern": "UPHY_*"}]})
+    write_board_setup(tmp_path, "default", {"copper_layers": 10, "net_classes": _defs()})
+    notes = fab_rules.apply_fab_rules(tmp_path, "default", [("LM74502 fine-pitch pins", LM74502_RULE)])
+    assert set(_classes(pro)) == {"Default", "Power_24V", "Power_24V_SRC", "Power_5V", "GMSL_50R", "USB3_85R"}
+    names = [n for n, _ in parse_dru_rules((tmp_path / "default.kicad_dru").read_text())]
+    assert names[:4] == ["net class GMSL_50R: inner", "net class GMSL_50R: inner pair",
+                         "net class USB3_85R: inner", "net class USB3_85R: inner pair"]
+    assert names[4:] == ["same-net hole to hole", "via-via copper spacing", "THT pads: thermal relief",
+                         "LM74502 fine-pitch pins"]
+    assert any("per-layer net-class rules" in n for n in notes)
+    assert json.loads(pro.read_text())["net_settings"]["netclass_patterns"] == [
+        {"netclass": "USB3_85R", "pattern": "UPHY_*"}
+    ]
+    assert fab_rules.apply_fab_rules(tmp_path, "default", [("LM74502 fine-pitch pins", LM74502_RULE)]) == []

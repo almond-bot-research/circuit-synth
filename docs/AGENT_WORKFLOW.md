@@ -213,6 +213,8 @@ build_project(
 - KiCad computes nothing from the stack-up. It documents the build for the
   fab; the trace geometry that goes with it is what the net classes
   declare. The board thickness in Board Setup is not derived from it.
+  `cs pcb route` takes the height of a via from it when it adds up a net's
+  length (Lengths, below).
 
 ## Routing as code: `cs pcb route`
 
@@ -237,13 +239,15 @@ def route(r):
 
 | Call | What it makes |
 |---|---|
-| `r.route(net, *items, layer="F.Cu", width=None, via=None)` | one trace through waypoints, joined with 45 degree doglegs |
-| `r.pair((p_net, n_net), *items, layer="F.Cu", width=None, gap=None, via=None, via_gap=None, p=None)` | both traces of a differential pair along one centre-line; returns the lengths and skew |
+| `r.route(net, *items, layer="F.Cu", width=None, via=None, length=None)` | one trace through waypoints, joined with 45 degree doglegs |
+| `r.pair((p_net, n_net), *items, layer="F.Cu", width=None, gap=None, via=None, via_gap=None, p=None, skew=None, length=None)` | both traces of a differential pair along one centre-line; returns the lengths and skew |
 | `r.track(net, points, layer="F.Cu", width=None)` | an exact polyline, no dogleg expansion |
 | `r.via(net, at, size=None, drill=None)` | one via |
 | `r.stitch(net, pad, dx, dy)` | pad, short stub, via: the usual plane connection |
 | `r.zone(net, layers, points, ...)` / `r.keepout(layers, points, ...)` | a pour / a rule area |
-| `r.at("REF.PAD", dx, dy)`, `r.pad("REF.PAD")`, `r.layers`, `r.lengths()` | lookups |
+| `r.match(name, nets, tolerance, length=None)` | a match group, checked at the end of the run (Length matching, below) |
+| `r.pad_lengths({"REF.PAD": mm})` | length behind a pad (lead, package), added to its net's length |
+| `r.at("REF.PAD", dx, dy)`, `r.pad("REF.PAD")`, `r.layers`, `r.length(net)`, `r.lengths()` | lookups |
 
 Items of `route`:
 
@@ -257,6 +261,9 @@ Items of `route`:
   layer, e.g. `"via:In7.Cu"`. A bare `"via"` swaps F.Cu and B.Cu.
 - A layer name on its own: continue on that layer without a via (to start
   on a through-hole pad's inner or back layer).
+- `"meander:<left|right|both>:<amplitude mm>"` before a waypoint (and
+  `"skew"` in a pair): the hop to it is where the tool lengthens the trace
+  (Length matching, below).
 
 Layers are the board's own enabled copper layers; any other name is a
 routing error that lists the valid ones. Vias are through vias whatever two
@@ -285,9 +292,10 @@ bend and the trace on the outside of a bend is the longer one.
   hole-to-hole minimum when choosing the via gap (0.6/0.3 vias need 0.2 or
   more).
 - Every run prints `P <mm>, N <mm>, skew <mm>, <n> via pair(s)` per pair
-  (skew is P minus N; track length, via barrels not counted). A 45 degree
-  bend costs 0.83 x (width + gap) of skew; opposite bends cancel. There is
-  no automatic length matching: add the detour where you want it.
+  (skew is P minus N; each is the net's length as defined under Lengths,
+  below). A 45 degree bend costs 0.83 x (width + gap) of skew; opposite
+  bends on the same layer cancel. Nothing is matched unless the routing
+  file asks for it: see Length matching, below.
 
 Widths, gaps and via sizes: a number passed in the call always wins.
 Otherwise `route`, `track`, `stitch` and `via` use the Router-wide
@@ -303,21 +311,122 @@ net classes drove the Router produce the same copper as before, and as
 included) for a design with `netclass_defs`. Setting them in the routing
 file overrides either way.
 
-Lengths: `cs pcb route <project_dir> <build> --lengths 'UPHY_*'`
-(repeatable; `'*'` for every net) prints each matching net's routed length
-in total and per layer, and its via count, over all copper on the board and
-not only the routing group. `r.lengths()` returns the same numbers inside a
-routing file, e.g. to check a link budget.
+Lengths are in mm; there is no delay model, so a mm on an outer layer and a
+mm on an inner one count the same. A net's length is the sum of:
+
+- its track on every layer, over all copper on the board and not only the
+  routing group;
+- the height of each via between the outermost layers it joins on that net
+  (the layers of the tracks that end on it, and of an SMD pad it sits in),
+  middle of copper to middle of copper, from the design's declared
+  stack-up. A through via from F.Cu to In2.Cu counts that height, not the
+  board's thickness; a via that joins one layer only (a stitching via)
+  counts nothing. A design that declares no stack-up gets no via heights,
+  and the run prints `lengths are track + pad lengths; via heights are not
+  counted (no stack-up declared)`;
+- pad lengths: the lead or package length behind a pad, from
+  `r.pad_lengths({"U1.A4": 1.82})` in the routing file or else from the
+  pad-to-die length the pad carries on the board.
+
+`cs pcb route <project_dir> <build> --lengths 'CSI0_*'` (repeatable; `'*'`
+for every net) prints each matching net's length: total, via count, and
+the share of each layer, of the via heights and of the pad lengths, with
+the match group the net is in. `r.length(net)` and `r.lengths()` return
+the same numbers inside a routing file, e.g. to check a link budget.
 
 ```
+  lengths are track + via heights from the declared stack-up + pad lengths
   pairs (mm; skew = P - N):
-    UPHY_RX1_P / UPHY_RX1_N: P 42.164, N 42.139, skew +0.025, 2 via pair(s)
-  lengths (mm), 3 net(s):
-    net                total  vias  per layer
-    /gmsl_a/COAX_A    41.745     2  F.Cu 3.910, In7.Cu 32.545, B.Cu 5.290
-    UPHY_RX1_N        42.139     2  F.Cu 6.583, In2.Cu 35.557
-    UPHY_RX1_P        42.164     2  F.Cu 6.607, In2.Cu 35.557
+    CSI0_D1_P / CSI0_D1_N: P 45.879, N 45.879, skew -0.000, 2 via pair(s)
+  tuning (mm):
+    CSI0_D1_P / CSI0_D1_N: skew +0.046 -> -0.000 (allowed 0.02): 1 bump(s) of 0.055 on CSI0_D1_N, In2.Cu (156.15, 98.15)->(181.6, 123.6)
+  lengths (mm), 2 net(s):
+    net           total  vias  per layer
+    CSI0_D1_N    45.879     2  F.Cu 5.045, In2.Cu 40.115, vias 0.719
+    CSI0_D1_P    45.879     2  F.Cu 5.310, In2.Cu 39.850, vias 0.719
 ```
+
+### Length matching
+
+Length matching is planned like the rest: the routing file names the
+segment, the tool sizes what goes on it and prints what it did. A marker
+between two waypoints names the hop from one to the other, which has to be
+one straight segment (horizontal, vertical or 45 degrees).
+
+```python
+def route(r):
+    r.pad_lengths({"J1.1": 0.2, "J1.2": 0.5})          # pin lengths from the connector's data
+    a = r.pair(("A_P", "A_N"), ("J1.1", "J1.2"), (11, 10), "skew", (19, 10), (21, 10), "via:B.Cu",
+               (25, 10), (30, 15), (30, 20), "via:F.Cu", (30, 25), ("U1.1", "U1.2"), skew=0.02)
+    r.pair(("B_P", "B_N"), ("J1.3", "J1.4"), (11, 30), (14, 30), "via:In2.Cu",
+           "meander:left:1.5", (34, 30), "via:F.Cu", "skew", (39, 30), ("U1.3", "U1.4"),
+           skew=0.02, length=a.length)
+    r.route("CLK", "J1.5", (15, 40), "via:In4.Cu", "meander:1.0", (35, 40), "via:F.Cu", "U1.5", length=38.0)
+    r.match("LANES", ["A_?", "B_?"], tolerance=0.05)
+    r.match("CLOCK", "CLK", tolerance=0.01, length=38.0)
+```
+
+```
+  tuning (mm):
+    A_P / A_N: skew +0.230 -> +0.000 (allowed 0.02): 2 bump(s) of 0.139 on A_N, F.Cu (11.0, 10.0)->(19.0, 10.0)
+    B_P / B_N: skew -0.250 -> +0.000 (allowed 0.02): 3 bump(s) of 0.101 on B_P, F.Cu (34.0, 30.0)->(39.0, 30.0)
+    B_P / B_N: length 31.547 -> 35.799: 2 meander(s) of 1.348 (left), In2.Cu (14.0, 30.0)->(34.0, 30.0)
+    CLK: length 31.419 -> 38.000: 4 meander(s) of 0.917 (both), In4.Cu (15.0, 40.0)->(35.0, 40.0)
+  match groups (mm; error = length - target):
+    LANES: 4 net(s), target 35.799 (the longest), tolerance 0.05: ok
+      A_N    35.799   -0.000  F.Cu 17.545, B.Cu 16.046, vias 1.708, pads 0.500
+      A_P    35.799   -0.000  F.Cu 17.315, B.Cu 16.576, vias 1.708, pads 0.200
+      B_N    35.799   -0.000  F.Cu 10.315, In2.Cu 24.515, vias 0.719, pads 0.250
+      B_P    35.799   +0.000  F.Cu 10.565, In2.Cu 24.515, vias 0.719
+    CLOCK: 1 net(s), target 38.000, tolerance 0.01: ok
+      CLK    38.000   +0.000  F.Cu 10.000, In4.Cu 26.581, vias 1.419
+```
+
+- Skew inside a pair: `"skew"` on a hop, with `skew=<mm>` in the call. When
+  P and N differ by more than that, the shorter trace gets bumps on that
+  hop that take the mismatch out (to 0.001mm, not just to the limit). A
+  bump leaves on a 45 degree diagonal away from the other trace, runs 3 x
+  the trace width and comes back. It is at most the pair's gap high, so the
+  gap at most doubles there; `"skew:<mm>"` sets another limit. Bumps are
+  3 x the trace width apart. With several `"skew"` hops each takes out the
+  mismatch built up by the end of its segment (the start pads' lengths
+  included) and the last one the rest, so the bumps can sit next to the
+  bends or pins that cause the mismatch. A pair that is within `skew`
+  already gets none (`nothing to add`).
+- Lengthening to a target: `"meander:<left|right|both>:<amplitude mm>"`
+  on a hop (`"meander:<mm>"` is `both`), with `length=<mm>` in the call.
+  An accordion on that hop, to the left or right of the direction of
+  travel or swinging both ways, brings the net to that length: the fewest
+  meanders that reach it, all the same height, at most `amplitude` from
+  the segment, corners cut at 45 degrees. For a pair the amplitude is that
+  of its centre-line, both traces meander together and keep their gap, and
+  the target is the mean of the two nets after the skew bumps. Several
+  `"meander"` hops fill up in order. `length=a.length` (what `r.pair`
+  returned) or `length=r.length(net)` lengthens one net to another.
+- Leg spacing: neighbouring legs of a meander keep `r.meander_spacing`
+  times the trace width of clear space between them (edge to edge); for a
+  pair, that many times its gap between the facing traces of two legs. The
+  default is 3: 3 x width for a single trace, 3 x gap for a pair. Width
+  and gap are the ones the segment is routed with (the net class's for its
+  layer unless the call gives them). Set `r.meander_spacing` in the routing
+  file for another multiple.
+- Match groups: `r.match(name, nets, tolerance, length=None)`. `nets` is a
+  pattern (`"CSI0_D?_?"`) or a list of patterns; a tuple of net names in
+  the list is one member whose nets add up (a link through a series
+  capacitor: `("TX_P", "TX_C_P")`). Every member has to be within
+  `tolerance` of the longest member, or of `length` when given. A group
+  only checks; put a `"meander"` on the members that have to grow. The
+  groups are measured on the finished board at the end of the run.
+- Exit status: a group out of tolerance (or with a member that has no
+  copper), and a tuned net that copper added later in the file put off its
+  target, are printed as `length error: ...` after the board is saved, and
+  the command exits 1. What cannot be built is a routing error and nothing
+  is written: a segment too short for the bumps or meanders it needs, a
+  net already longer than its `length`, a marker without its `skew=` /
+  `length=`, or a `skew=` / `length=` that is not met and has no marker to
+  meet it on.
+- The tool does not look for room: an amplitude that runs the meander into
+  other copper shows up in `cs pcb drc`, as for any other trace.
 
 ## Parts and sourcing
 

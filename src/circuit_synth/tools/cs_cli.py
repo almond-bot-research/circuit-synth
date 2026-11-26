@@ -169,8 +169,9 @@ def pcb_extract_footprints(board: str, specs: tuple[str, ...]) -> None:
               help="Routing file (default: <project_dir>/routing.py).")
 @click.option("--no-fill", is_flag=True, help="Skip the zone refill.")
 @click.option("--lengths", "lengths", multiple=True, metavar="PATTERN",
-              help="Print the routed length (per layer, via count) of the nets matching "
-              "PATTERN, e.g. 'UPHY_*' or '*' for all (repeatable).")
+              help="Print the routed length (total, via count, share per layer, via heights, pad "
+              "lengths, match groups) of the nets matching PATTERN, e.g. 'UPHY_*' or '*' for all "
+              "(repeatable).")
 def pcb_route(project_dir: str, build_name: str, routing: str | None, no_fill: bool,
               lengths: tuple[str, ...]) -> None:
     """Apply a hand-written routing file (tracks, vias, zones) to the board.
@@ -183,6 +184,9 @@ def pcb_route(project_dir: str, build_name: str, routing: str | None, no_fill: b
     net classes. The copper it creates lives in one board group,
     `routing`, which is rebuilt on every run; everything else on the
     board is left alone. Each pair's lengths and skew are printed.
+    Length matching is planned in routing.py too: skew bumps and meanders
+    on the segments it names, sized by the tool, and match groups
+    (r.match). Exits 1 when a match group is out of tolerance.
     See circuit_synth/pcb/scripts/route_pcb.py for the Router API.
     """
     args = [str(Path(project_dir).resolve()), build_name]

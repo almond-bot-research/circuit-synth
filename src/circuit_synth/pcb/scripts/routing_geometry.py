@@ -219,3 +219,247 @@ def via_span(kind: str, layers: list[str], from_layer: str, to_layer: str) -> tu
     if kind != "through":
         raise ValueError(f"via type {kind!r} is not supported (through vias only)")
     return layers[0], layers[-1]
+
+
+# ------------------------------------------------------------ length tuning
+
+_SQRT2 = math.sqrt(2)
+# Every corner of a meander is cut on a 45 degree diagonal, this share of
+# the leg pitch either side of the corner: a U-turn then is half a regular
+# octagon (cut, flat and cut the same length).
+_CHAMFER = 1 / (2 + _SQRT2)
+# What cutting a corner saves, per mm of cut.
+_CUT = 2 - _SQRT2
+MEANDER_SIDES = ("left", "right", "both")
+
+
+def _meander_corners(count: int, side: str) -> int:
+    return 2 * count + 2 if side == "both" else 4 * count
+
+
+def _meander_added(count: int, height: float, pitch: float, side: str) -> float:
+    """What `count` meanders of this height add to a segment's length."""
+    return 2 * count * height - _meander_corners(count, side) * _CUT * min(pitch * _CHAMFER, height / 2)
+
+
+def _meander_fit(length: float, pitch: float, side: str) -> int:
+    """How many meanders a segment of this length holds. One-sided, the
+    meanders stand two leg pitches apart; alternating sides, one. Either
+    end keeps half a leg pitch of straight segment beyond the corner cuts."""
+    runs = int((length - pitch - 2 * pitch * _CHAMFER + _EPS) // pitch)
+    return max(runs if side == "both" else (runs + 1) // 2, 0)
+
+
+def _check_side(side: str) -> None:
+    if side not in MEANDER_SIDES:
+        raise ValueError(f"side must be 'left', 'right' or 'both', not {side!r}")
+
+
+def meander_capacity(length: float, amplitude: float, pitch: float, side: str = "left") -> float:
+    """The most length (mm) a meander can add to a straight segment of
+    `length` mm: as many meanders as fit, each as tall as `amplitude`."""
+    _check_side(side)
+    count = _meander_fit(length, pitch, side)
+    return _meander_added(count, amplitude, pitch, side) if count else 0.0
+
+
+def meander(
+    a: Point, b: Point, extra: float, amplitude: float, pitch: float, side: str = "left"
+) -> tuple[list[Point], int, float]:
+    """An accordion on the straight segment a->b: (polyline from a to b that
+    is `extra` mm longer than the segment, number of meanders, their height).
+
+    Each meander leaves the segment square to it, runs `pitch` along, and
+    comes back, so neighbouring legs are `pitch` apart centre to centre
+    (the caller derives it from the trace: its width plus the clear space
+    wanted between legs). `side` is where they go as seen in the direction
+    of travel: "left" or "right" of the segment, each meander standing on
+    it, or "both", swinging from one side to the other. Corners are cut on
+    45 degree diagonals, so a 45-degree segment gives a 45-degree meander.
+
+    The height is how far the polyline moves from the segment, at most
+    `amplitude`. The fewest meanders that can reach `extra` are used, all
+    the same height, sized so the added length is exact. They sit in the
+    middle of the segment. A meander too low for a leg degenerates to a
+    trapezoid (a diagonal out, a flat, a diagonal back).
+
+    Raises ValueError when the segment cannot hold that much.
+    """
+    _check_side(side)
+    if extra < _EPS:
+        return [a, b], 0, 0.0
+    if amplitude <= 0 or pitch <= 0:
+        raise ValueError("amplitude and leg pitch must be positive")
+    length = math.dist(a, b)
+    most = _meander_fit(length, pitch, side)
+    if not most:
+        raise ValueError(
+            f"a {length:.3f}mm segment is too short for a meander at a {pitch:.3f}mm leg pitch "
+            f"(one needs {2 * pitch * (1 + _CHAMFER):.3f}mm)"
+        )
+    count = next((n for n in range(1, most + 1) if _meander_added(n, amplitude, pitch, side) >= extra - 1e-12), 0)
+    if not count:
+        raise ValueError(
+            f"+{extra:.3f}mm does not fit: a {length:.3f}mm segment at a {pitch:.3f}mm leg pitch holds at most "
+            f"{most} meander(s) of {amplitude:.3f}mm: +{_meander_added(most, amplitude, pitch, side):.3f}mm"
+        )
+    corners, cut = _meander_corners(count, side), pitch * _CHAMFER
+    if 2 * cut <= amplitude and extra > _meander_added(count, 2 * cut, pitch, side):
+        height = (extra + corners * _CUT * cut) / (2 * count)     # legs with full corner cuts
+    else:
+        height = extra / (2 * count - corners * _CUT / 2)         # too low for a leg: the cuts are height / 2
+    height = min(height, amplitude)
+    if side == "both":
+        levels = [height if i % 2 == 0 else -height for i in range(count)]
+    else:
+        out = height if side == "left" else -height
+        levels = [out if i % 2 == 0 else 0.0 for i in range(2 * count - 1)]
+    u = (length - len(levels) * pitch) / 2
+    square: list[Point] = [(0.0, 0.0), (u, 0.0)]
+    for level in levels:
+        square += [(u, level), (u + pitch, level)]
+        u += pitch
+    square += [(u, 0.0), (length, 0.0)]
+    return _to_board(_cut_corners(square, min(cut, height / 2)), a, b), count, height
+
+
+def skew_bumps(
+    a: Point, b: Point, extra: float, amplitude: float, top: float, side: str
+) -> tuple[list[Point], int, float]:
+    """Small bumps on the straight trace segment a->b, for the shorter trace
+    of a differential pair: (polyline from a to b that is `extra` mm longer
+    than the segment, number of bumps, their height).
+
+    A bump leaves the segment on a 45 degree diagonal, runs `top` mm
+    parallel to it and comes back on a diagonal, to the "left" or "right"
+    of travel (the caller picks the side away from the other trace). It
+    adds 0.83 x its height. The fewest bumps that keep the height within
+    `amplitude` are used, all the same height, sized so the added length is
+    exact, with `top` mm of plain trace between two and at least half that
+    at either end, in the middle of the segment.
+
+    Raises ValueError when the segment is too short for them.
+    """
+    if side not in ("left", "right"):
+        raise ValueError(f"side must be 'left' or 'right', not {side!r}")
+    if extra < _EPS:
+        return [a, b], 0, 0.0
+    if amplitude <= 0 or top <= 0:
+        raise ValueError("amplitude and top length must be positive")
+    per_bump = 2 * (_SQRT2 - 1)
+    count = math.ceil(extra / (per_bump * amplitude) - 1e-9)
+    height = extra / (per_bump * count)
+    length = math.dist(a, b)
+    need = count * (2 * height + 2 * top)
+    if need > length + _EPS:
+        raise ValueError(f"{count} bump(s) of {height:.3f}mm need {need:.3f}mm; the segment has {length:.3f}mm")
+    u = (length - need + top) / 2
+    out = height if side == "left" else -height
+    local: list[Point] = [(0.0, 0.0)]
+    for _ in range(count):
+        local += [(u, 0.0), (u + height, out), (u + height + top, out), (u + 2 * height + top, 0.0)]
+        u += 2 * height + 2 * top
+    local.append((length, 0.0))
+    return _to_board(local, a, b), count, height
+
+
+def _cut_corners(points: list[Point], cut: float) -> list[Point]:
+    """The polyline with every corner replaced by a diagonal from `cut`
+    before it to `cut` after it."""
+    out = [points[0]]
+    for before, corner, after in zip(points, points[1:], points[2:]):
+        (ix, iy), (ox, oy) = heading(before, corner), heading(corner, after)
+        out += [(corner[0] - cut * ix, corner[1] - cut * iy), (corner[0] + cut * ox, corner[1] + cut * oy)]
+    out.append(points[-1])
+    return out
+
+
+def _to_board(local: list[Point], a: Point, b: Point) -> list[Point]:
+    """Points given as (mm along a->b, mm to the left of it) in board
+    coordinates, from exactly `a` to exactly `b`."""
+    (ux, uy), (nx, ny) = heading(a, b), left_normal(a, b)
+    inner = [(a[0] + u * ux + v * nx, a[1] + u * uy + v * ny) for u, v in local[1:-1]]
+    return _join(_join([a], inner), [b])
+
+
+def locate(path: list[Point], a: Point, b: Point) -> tuple[int, Point, Point]:
+    """Where the straight run a->b lies on a polyline: (index of the
+    segment that runs along it in the same direction, the two ends of the
+    part of a->b that segment covers).
+
+    Finds the trace segment a routing-file hop turned into after doglegs
+    merged collinear hops, corners were mitred or the ends set back.
+    Raises ValueError when no segment runs along a->b.
+    """
+    ux, uy = heading(a, b)
+    span = math.dist(a, b)
+    for i, (p, q) in enumerate(zip(path, path[1:])):
+        if any(abs((pt[0] - a[0]) * uy - (pt[1] - a[1]) * ux) > _EPS for pt in (p, q)):
+            continue
+        start, end = ((pt[0] - a[0]) * ux + (pt[1] - a[1]) * uy for pt in (p, q))
+        low, high = max(start, 0.0), min(end, span)
+        if high - low > _EPS:
+            return i, (a[0] + low * ux, a[1] + low * uy), (a[0] + high * ux, a[1] + high * uy)
+    raise ValueError(f"no segment runs along {a}->{b}")
+
+
+def splice(path: list[Point], index: int, points: list[Point]) -> list[Point]:
+    """The polyline with `points` (a detour that starts and ends on the
+    segment after `path[index]`) put into that segment."""
+    return _join(_join(path[: index + 1], points), path[index + 1 :])
+
+
+def net_length(tracks, vias, pads=(), depths: dict[str, float] | None = None) -> dict:
+    """The length of one net's copper, as `cs pcb route` counts it:
+
+        {"layers": {layer: mm of track}, "vias": count, "via_length": mm,
+         "pad_length": mm, "total": mm}
+
+    `tracks` are (layer, start, end, length) per segment or arc, `vias`
+    (centre, pad radius), `pads` (bounding box (x0, y0, x1, y1), copper
+    layer or None for a through-hole pad, extra length in mm).
+
+    A via counts the height between the outermost layers it joins: those
+    of the tracks that end inside its pad, and of an SMD pad it sits in.
+    The heights come from `depths` (stackup.copper_depths); without it, or
+    for a via that joins fewer than two layers (a stitch to a plane), a
+    via adds nothing. `pad_length` is the sum of the pads' extra lengths.
+    """
+    layers: dict[str, float] = {}
+    for layer, _, _, length in tracks:
+        layers[layer] = layers.get(layer, 0.0) + length
+    via_length = 0.0
+    if depths and vias:
+        cell = max(max(radius for _, radius in vias), 0.5)
+        ends: dict[tuple[int, int], list] = {}
+        for layer, start, end, _ in tracks:
+            for x, y in (start, end):
+                ends.setdefault((math.floor(x / cell), math.floor(y / cell)), []).append((x, y, layer))
+        boxes: dict[tuple[int, int], list] = {}
+        for (x0, y0, x1, y1), layer, _ in pads:
+            if layer is None:
+                continue
+            for i in range(math.floor(x0 / cell), math.floor(x1 / cell) + 1):
+                for j in range(math.floor(y0 / cell), math.floor(y1 / cell) + 1):
+                    boxes.setdefault((i, j), []).append((x0, y0, x1, y1, layer))
+        for (x, y), radius in vias:
+            cx, cy = math.floor(x / cell), math.floor(y / cell)
+            joined = {
+                layer
+                for i in (cx - 1, cx, cx + 1)
+                for j in (cy - 1, cy, cy + 1)
+                for ex, ey, layer in ends.get((i, j), ())
+                if math.hypot(ex - x, ey - y) <= radius + _EPS
+            }
+            joined |= {layer for x0, y0, x1, y1, layer in boxes.get((cx, cy), ()) if x0 <= x <= x1 and y0 <= y <= y1}
+            known = [depths[layer] for layer in joined if layer in depths]
+            if len(known) > 1:
+                via_length += max(known) - min(known)
+    pad_length = sum(extra for _, _, extra in pads)
+    return {
+        "layers": layers,
+        "vias": len(vias),
+        "via_length": via_length,
+        "pad_length": pad_length,
+        "total": sum(layers.values()) + via_length + pad_length,
+    }

@@ -15,7 +15,8 @@ text, in the layout pcbnew itself writes; pcbnew carries an existing block
 through load/save unchanged. Nothing in KiCad computes impedance from it:
 it records the build for the fab and for whoever opens Board Setup, and
 the trace geometry that goes with it is declared as net classes
-(design_rules.net_class).
+(design_rules.net_class). `cs pcb route` takes the height of a via from it
+(`copper_depths` / `layer_distance`) when it adds up a net's length.
 
 Stdlib only: imported by build_project (the circuit-synth environment) and
 by `cs pcb sync` (pcbnew Python).
@@ -94,6 +95,32 @@ def copper_layer_count(spec: Mapping) -> int:
 def copper_layer_names(count: int) -> list[str]:
     """KiCad's copper layer names for a board of `count` layers, top to bottom."""
     return ["F.Cu", *(f"In{i}.Cu" for i in range(1, count - 1)), "B.Cu"]
+
+
+def copper_depths(spec: Mapping) -> dict[str, float]:
+    """Depth (mm) of the middle of each copper layer below the top of F.Cu,
+    keyed by layer name, top to bottom."""
+    depths: dict[str, float] = {}
+    top = 0.0
+    for i, name in enumerate(copper_layer_names(copper_layer_count(spec))):
+        copper = spec["outer_copper"] if name in ("F.Cu", "B.Cu") else spec["inner_copper"]
+        depths[name] = top + copper / 2
+        top += copper
+        if i < len(spec["dielectrics"]):
+            top += spec["dielectrics"][i]["thickness"]
+    return depths
+
+
+def layer_distance(spec: Mapping, first: str, second: str) -> float:
+    """Height (mm) between two copper layers: what a via joining them adds
+    to a net's length. Measured between the middles of the two layers, so
+    half of each one's copper and everything between them, as KiCad's
+    BOARD_STACKUP::GetLayerDistance does."""
+    depths = copper_depths(spec)
+    for layer in (first, second):
+        if layer not in depths:
+            raise ValueError(f"no copper layer {layer!r} in the stack-up; it has {', '.join(depths)}")
+    return abs(depths[first] - depths[second])
 
 
 def _num(value: float) -> str:

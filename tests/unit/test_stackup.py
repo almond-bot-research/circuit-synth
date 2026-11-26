@@ -218,6 +218,34 @@ def test_board_without_setup_or_with_broken_text_is_an_error(tmp_path):
         read_stackup_block("not a board")
 
 
+# ------------------------------------------------------------ via heights
+
+def test_copper_depths_are_to_the_middle_of_each_layer():
+    from circuit_synth.pcb.scripts.stackup import copper_depths
+
+    depths = copper_depths(_four())
+    assert list(depths) == ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+    assert depths["F.Cu"] == pytest.approx(0.035 / 2)
+    assert depths["In1.Cu"] == pytest.approx(0.035 + 0.1194 + 0.0152 / 2)
+    assert depths["In2.Cu"] == pytest.approx(0.035 + 0.1194 + 0.0152 + 0.2 + 0.0152 / 2)
+    assert depths["B.Cu"] == pytest.approx(0.035 + 0.1194 + 0.0152 + 0.2 + 0.0152 + 0.1194 + 0.035 / 2)
+
+
+def test_layer_distance_is_the_height_a_via_covers_between_two_layers():
+    from circuit_synth.pcb.scripts.stackup import layer_distance
+
+    # the thor carrier's 10-layer build: half of each end layer's copper, and
+    # everything between them (how KiCad's own GetLayerDistance counts it)
+    ten = stackup([PREPREG, CORE] * 4 + [PREPREG], mask=0.03)
+    assert layer_distance(ten, "F.Cu", "In2.Cu") == pytest.approx(0.0175 + 0.1194 + 0.0152 + 0.2 + 0.0076)
+    assert layer_distance(ten, "In2.Cu", "F.Cu") == pytest.approx(0.3597)             # either way round
+    assert layer_distance(ten, "In2.Cu", "In7.Cu") == pytest.approx(0.0152 * 5 + 0.1194 * 3 + 0.2 * 2)
+    assert layer_distance(ten, "F.Cu", "B.Cu") == pytest.approx(0.035 + 8 * 0.0152 + 5 * 0.1194 + 4 * 0.2)
+    assert layer_distance(ten, "In4.Cu", "In4.Cu") == 0
+    with pytest.raises(ValueError, match="no copper layer 'In9.Cu' in the stack-up"):
+        layer_distance(ten, "F.Cu", "In9.Cu")
+
+
 # ------------------------------------------------------------ build_project
 
 def test_build_project_checks_the_layer_count_against_the_stackup(tmp_path):

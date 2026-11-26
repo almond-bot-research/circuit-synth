@@ -18,8 +18,14 @@ from pathlib import Path
 from circuit_synth import Circuit
 from circuit_synth.library import ENV_VAR as _LIB_ENV
 from circuit_synth.library import ensure_env, footprint_lib_dirs, library_root
-from circuit_synth.pcb.scripts.design_rules import apply_net_classes, unmatched_patterns
+from circuit_synth.pcb.scripts.design_rules import (
+    apply_net_class_rules,
+    apply_net_classes,
+    unmatched_patterns,
+    write_board_setup,
+)
 from circuit_synth.pcb.scripts.kicadpcb import find_kicad_cli, is_dnp
+from circuit_synth.pcb.scripts.stackup import copper_layer_count
 
 from .address import existing_refs, finalize_design
 from .schematic_labels import compute_global_nets, parse_spans, rewrite_labels
@@ -329,6 +335,9 @@ def build_project(
     parts_dirs: list[Path],
     ref_map: dict[str, str] | Path | None = None,
     netclasses: dict[str, list[str]] | None = None,
+    netclass_defs: list[dict] | None = None,
+    copper_layers: int | None = None,
+    stackup: dict | None = None,
 ) -> Path:
     """Generate the KiCad project (schematic + netlists) for one build.
 
@@ -338,12 +347,39 @@ def build_project(
     replaces the project's netclass_patterns; when omitted, the patterns
     already in the .kicad_pro are left alone. Classes must be one of the
     standard classes (design_rules.STANDARD_NET_CLASSES, stamped into the
-    project here and on every `cs pcb sync`) or already defined in the
-    .kicad_pro. Patterns that match no net are reported as warnings.
+    project here and on every `cs pcb sync`), one declared in
+    `netclass_defs`, or already defined in the .kicad_pro. Patterns that
+    match no net are reported as warnings.
+
+    `netclass_defs` declares the design's own net classes, a list of
+    `net_class(...)` (clearance, track width, differential-pair width and
+    gap, via size, and per-layer overrides of the widths, gap and
+    clearance). They are stamped into the .kicad_pro next to the standard
+    classes, their per-layer values into the .kicad_dru as generated rules,
+    and `cs pcb route` takes its widths, gaps and via sizes from them (see
+    design_rules and pcb/scripts/route_pcb.py).
+
+    `copper_layers` is the copper layer count of the board (default: 4 for
+    a new board), `stackup` a `stackup(...)` describing its build; the
+    stack-up implies the layer count, so give one or the other. `cs pcb
+    sync` applies both to the board (see pcb/scripts/stackup.py).
+
+    The three board declarations travel to the pcbnew-side tools in
+    `<build>.board_setup.json` next to the project; it is removed again
+    when a design declares none of them.
 
     Returns the project directory (`layouts/<build_name>`).
     """
     ensure_env()
+    netclass_defs = list(netclass_defs or [])
+    if stackup is not None:
+        if copper_layers not in (None, copper_layer_count(stackup)):
+            raise ValueError(
+                f"copper_layers={copper_layers} but the stack-up describes {copper_layer_count(stackup)} copper layers"
+            )
+        copper_layers = copper_layer_count(stackup)
+    if copper_layers is not None and (copper_layers < 2 or copper_layers % 2):
+        raise ValueError(f"copper_layers must be an even number of at least 2, not {copper_layers}")
     out = Path(layouts_dir) / build_name
     # Keep the designators the existing schematic already assigned: the
     # schematic sync matches components by designator, so letting them
@@ -372,8 +408,13 @@ def build_project(
     dnp_refs = _sync_dnp(out, build_name)
     rewrite_labels(out, build_name, global_nets)
     _lib_tables(out, list(parts_dirs))
+    setup = {"copper_layers": copper_layers, "stackup": stackup, "net_classes": netclass_defs}
     # Before the netlist export, which records each net's class
-    for note in apply_net_classes(out / f"{build_name}.kicad_pro", netclasses):
+    for note in [
+        *write_board_setup(out, build_name, setup),
+        *apply_net_classes(out / f"{build_name}.kicad_pro", netclasses, netclass_defs),
+        *apply_net_class_rules(out / f"{build_name}.kicad_dru", netclass_defs),
+    ]:
         print(f"[{build_name}] {note}")
     # After label rewriting: the labels define the connectivity kicad-cli sees
     _export_netlist(out, build_name)

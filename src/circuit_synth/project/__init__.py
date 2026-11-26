@@ -9,6 +9,9 @@ them. Components carry a hidden `address` extra field (expanded by
 across designator renumbering.
 """
 
+from circuit_synth.pcb.scripts.design_rules import net_class
+from circuit_synth.pcb.scripts.stackup import dielectric, stackup
+
 from .address import finalize_design, instance
 from .build import build_project, parts_dir, setup_symbol_dirs
 from .schematic_labels import compute_global_nets, rewrite_labels
@@ -16,9 +19,12 @@ from .schematic_labels import compute_global_nets, rewrite_labels
 __all__ = [
     "build_project",
     "compute_global_nets",
+    "dielectric",
     "finalize_design",
     "instance",
+    "net_class",
     "parts_dir",
     "rewrite_labels",
     "setup_symbol_dirs",
+    "stackup",
 ]

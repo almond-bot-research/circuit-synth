@@ -89,9 +89,11 @@ def pcb_sync(project_dir: str, build_name: str) -> None:
     """Create/update the .kicad_pcb from the generated schematic.
 
     Adds/removes/swaps footprints, assigns pad nets, copies part fields,
-    normalizes 3D model paths. Placement and routing are preserved. Parts
+    refreshes each footprint's 3D models from its library footprint and
+    normalizes their paths. Placement and routing are preserved. Parts
     marked DNP=True in Python keep their footprint and get pcbnew's "Do not
-    populate" attribute.
+    populate" attribute. Applies what build.py declared about the board
+    (copper layer count, stack-up, the design's own net classes).
     """
     _pcb_script("sync_pcb.py", [str(Path(project_dir).resolve()), build_name])
 
@@ -166,19 +168,32 @@ def pcb_extract_footprints(board: str, specs: tuple[str, ...]) -> None:
 @click.option("--routing", "routing", type=click.Path(exists=True, dir_okay=False), default=None,
               help="Routing file (default: <project_dir>/routing.py).")
 @click.option("--no-fill", is_flag=True, help="Skip the zone refill.")
-def pcb_route(project_dir: str, build_name: str, routing: str | None, no_fill: bool) -> None:
+@click.option("--lengths", "lengths", multiple=True, metavar="PATTERN",
+              help="Print the routed length (total, via count, share per layer, via heights, pad "
+              "lengths, match groups) of the nets matching PATTERN, e.g. 'UPHY_*' or '*' for all "
+              "(repeatable).")
+def pcb_route(project_dir: str, build_name: str, routing: str | None, no_fill: bool,
+              lengths: tuple[str, ...]) -> None:
     """Apply a hand-written routing file (tracks, vias, zones) to the board.
 
     Not an autorouter: routing.py defines route(r) and lists every trace
-    as waypoints (pads or coordinates, joined with 45 degree doglegs).
-    The copper it creates lives in one board group, `routing`, which is
-    rebuilt on every run; everything else on the board is left alone.
+    as waypoints (pads or coordinates, joined with 45 degree doglegs),
+    on any of the board's copper layers ("via:In7.Cu" changes layer), and
+    differential pairs as one centre-line (r.pair). Widths, pair gaps and
+    via sizes come from the net's class when the design declares its own
+    net classes. The copper it creates lives in one board group,
+    `routing`, which is rebuilt on every run; everything else on the
+    board is left alone. Each pair's lengths and skew are printed.
+    Length matching is planned in routing.py too: skew bumps and meanders
+    on the segments it names, sized by the tool, and match groups
+    (r.match). Exits 1 when a match group is out of tolerance.
     See circuit_synth/pcb/scripts/route_pcb.py for the Router API.
     """
     args = [str(Path(project_dir).resolve()), build_name]
     args.append(str(Path(routing).resolve()) if routing else str(Path(project_dir).resolve() / "routing.py"))
     if no_fill:
         args.append("--no-fill")
+    args += [f"--lengths={pattern}" for pattern in lengths]
     _pcb_script("route_pcb.py", args)
 
 

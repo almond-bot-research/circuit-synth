@@ -16,7 +16,8 @@ the fab would reject without per-project setup:
   vias whose rings nearly touch are a spacing reject even though stock
   DRC is silent (`cs pcb fab` cross-checks all copper, not just vias)
 - newly created boards default to 4 copper layers (the repo convention:
-  In1 solid GND, In2 power islands)
+  In1 solid GND, In2 power islands) unless the design declares its own
+  count (build_project's `copper_layers` / `stackup`)
 - copper pours are normalized to the repo convention on every sync:
   0.2mm clearance, 0.1mm minimum width, solid (non-thermal-relief) pad
   connections; a stamped .kicad_dru rule then gives through-hole pads
@@ -25,9 +26,10 @@ the fab would reject without per-project setup:
   through-hole. Per-zone pcbnew settings would be reset by the next sync;
   the rule survives it
 
-Board conventions that are not fab capabilities - the standard net classes
-and DRC rules carried by part dirs (`<part_dir>/rules.kicad_dru`) - are
-stamped alongside these; see design_rules.
+Board conventions that are not fab capabilities - the standard net classes,
+a design's own net classes with their per-layer rules, and DRC rules
+carried by part dirs (`<part_dir>/rules.kicad_dru`) - are stamped alongside
+these; see design_rules.
 """
 
 from __future__ import annotations
@@ -36,7 +38,12 @@ import json
 from pathlib import Path
 
 import pcbnew
-from design_rules import append_dru_rules, apply_net_classes
+from design_rules import (
+    append_dru_rules,
+    apply_net_class_rules,
+    apply_net_classes,
+    load_board_setup,
+)
 
 # Keys and units match KiCad's board.design_settings.rules (mm).
 JLCPCB_RULES = {
@@ -122,7 +129,8 @@ def apply_fab_rules(
     build_name: str,
     part_rules: list[tuple[str, str]] = (),
 ) -> list[str]:
-    """Stamp the fab capabilities, the standard net classes, and the given
+    """Stamp the fab capabilities, the standard net classes, the design's
+    own net classes (from the build's board-setup file) and the given
     part-carried DRC rules (design_rules.part_dru_rules) onto one build.
     Returns log messages."""
     notes: list[str] = []
@@ -140,7 +148,8 @@ def apply_fab_rules(
             rules.update(JLCPCB_RULES)
             pro_path.write_text(json.dumps(data, indent=2) + "\n")
             notes.append(f"fab constraints stamped into {pro_path.name}: {', '.join(changed)}")
-    notes += apply_net_classes(pro_path)
+    declared = load_board_setup(project_dir, build_name).get("net_classes", [])
+    notes += apply_net_classes(pro_path, defs=declared)
 
     dru_path = project_dir / f"{build_name}.kicad_dru"
     if not dru_path.exists():
@@ -149,6 +158,7 @@ def apply_fab_rules(
     else:
         notes += append_dru_rules(dru_path, DRU_RULES, "stamped")
     notes += append_dru_rules(dru_path, list(part_rules), "part")
+    notes += apply_net_class_rules(dru_path, declared)
 
     return notes
 
@@ -158,14 +168,24 @@ ZONE_CLEARANCE = pcbnew.FromMM(0.2)
 ZONE_MIN_THICKNESS = pcbnew.FromMM(0.1)
 
 
-def apply_board_fab_defaults(board, new_board: bool) -> list[str]:
+def apply_board_fab_defaults(board, new_board: bool, copper_layers: int | None = None) -> list[str]:
     """Normalize board-level conventions. Returns log messages; the caller
-    must refill zones and save if anything is reported."""
+    must refill zones and save if anything is reported.
+
+    `copper_layers` is the count the design declared, if it did: a new
+    board gets it instead of COPPER_LAYERS, and an existing board with
+    fewer layers is grown to it. A board with more layers is left alone,
+    since removing layers deletes the copper on them."""
     notes: list[str] = []
 
-    if new_board and board.GetCopperLayerCount() != COPPER_LAYERS:
-        board.SetCopperLayerCount(COPPER_LAYERS)
-        notes.append(f"new board set to {COPPER_LAYERS} copper layers")
+    have = board.GetCopperLayerCount()
+    want = copper_layers or COPPER_LAYERS
+    if new_board and have != want:
+        board.SetCopperLayerCount(want)
+        notes.append(f"new board set to {want} copper layers")
+    elif copper_layers and have < copper_layers:
+        board.SetCopperLayerCount(copper_layers)
+        notes.append(f"board grown from {have} to {copper_layers} copper layers")
 
     # Defaults for zones drawn later in pcbnew.
     settings = board.GetDesignSettings().GetDefaultZoneSettings()

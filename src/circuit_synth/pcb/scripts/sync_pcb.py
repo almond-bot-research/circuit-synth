@@ -8,8 +8,10 @@ schematic netlist. Existing placement, tracks, and zones are preserved.
 Each footprint also gets the part's fields (address, Manufacturer,
 Partnumber, distributor numbers) copied from Python, because the board - not
 the schematic - is what the IPC-2581 fab export reads them from. Footprint
-3D model paths are normalized to stable references (models live next to
-their footprints; see kicadpcb.normalize_models).
+3D models follow the library footprint: a placed footprint whose model list
+(file, offset, rotation, scale) differs from its library footprint's gets
+the library's, in place, and model paths are normalized to stable references
+(models live next to their footprints; see kicadpcb.normalize_models).
 
 A part marked `DNP=True` in Python keeps its footprint (the pads, courtyard
 and silkscreen stay, so the same board can be built populated or not) and
@@ -22,6 +24,15 @@ stitching exception (see fab_rules). It also stamps the standard net classes
 into the .kicad_pro and appends the DRC rules shipped by the part dirs of
 the footprints on the board (`<part_dir>/rules.kicad_dru`; see
 design_rules).
+
+What the design declared about its board in build.py (build_project's
+`copper_layers`, `stackup`, `netclass_defs`; read from the build's
+board-setup file, see design_rules.write_board_setup) is applied here too:
+a new board gets the declared copper layer count instead of the default 4
+(an existing board with fewer layers is grown, never shrunk), the board
+file's stack-up block is kept equal to the declared stack-up (see stackup),
+and the design's own net classes and their per-layer rules are stamped with
+the standard ones.
 
 Usage:
   cs pcb sync <project_dir> <build_name>
@@ -36,7 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pcbnew  # noqa: E402
 
-from design_rules import part_dru_rules  # noqa: E402
+from design_rules import load_board_setup, part_dru_rules  # noqa: E402
 from fab_rules import apply_board_fab_defaults, apply_fab_rules  # noqa: E402
 from kicadpcb import (  # noqa: E402
     assign_nets,
@@ -50,6 +61,7 @@ from kicadpcb import (  # noqa: E402
     place_staging,
     set_field,
 )
+from stackup import write_stackup  # noqa: E402
 
 
 def load_footprint(libs: dict[str, Path], fpid: str):
@@ -83,6 +95,11 @@ def sync(project_dir: Path, build_name: str) -> None:
     libs = fp_lib_paths(project_dir)
 
     new_board = not pcb_path.exists()
+    # Saving a board pcbnew did not load from this project writes pcbnew's
+    # blank project over the .kicad_pro, losing what `cs build` put there
+    # (the net-class assignments and the design's own classes); keep it.
+    pro_path = project_dir / f"{build_name}.kicad_pro"
+    project = pro_path.read_text() if new_board and pro_path.exists() else None
     if new_board:
         board = pcbnew.CreateEmptyBoard()
     else:
@@ -199,12 +216,26 @@ def sync(project_dir: Path, build_name: str) -> None:
 
     assign_nets(board, netlist)
     healed = heal_copper_nets(board)
-    remodeled = normalize_models(board, project_dir, libs)
-    board_notes = apply_board_fab_defaults(board, new_board)
+    remodeled, refreshed = normalize_models(board, project_dir, libs)
+    setup = load_board_setup(project_dir, build_name)
+    board_notes = apply_board_fab_defaults(board, new_board, setup.get("copper_layers"))
     if board_notes and not new_board:
         # Zone settings changed under existing fills; regenerate them.
         pcbnew.ZONE_FILLER(board).Fill(board.Zones())
     pcbnew.SaveBoard(str(pcb_path), board)
+    if project is not None:
+        pro_path.write_text(project)
+    have = board.GetCopperLayerCount()
+    declared_layers = setup.get("copper_layers")
+    if declared_layers and have > declared_layers:
+        board_notes.append(
+            f"warning: the board has {have} copper layers, the design declares {declared_layers}; "
+            "left alone (remove layers in pcbnew if that is intended)"
+        )
+    elif setup.get("stackup"):
+        # After the save: pcbnew cannot set the stack-up, but keeps the
+        # block it finds in the file.
+        board_notes += write_stackup(pcb_path, setup["stackup"])
     print(
         f"[{build_name}] pcb sync: +{len(added)} -{len(removed) + len(stale)} "
         f"swapped {len(swapped)} -> {pcb_path}"
@@ -221,6 +252,8 @@ def sync(project_dir: Path, build_name: str) -> None:
         print(f"  {note}")
     if remodeled:
         print(f"  3d model paths rewritten: {remodeled}")
+    if refreshed:
+        print(f"  3d models refreshed from the library: {len(refreshed)} footprint(s) ({', '.join(sorted(refreshed))})")
     used_libs = {str(fp.GetFPID().GetLibNickname()) for fp in board.GetFootprints()}
     part_rules = part_dru_rules(libs, used_libs)
     for note in [*board_notes, *apply_fab_rules(project_dir, build_name, part_rules)]:

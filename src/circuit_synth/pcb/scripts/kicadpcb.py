@@ -257,24 +257,49 @@ def fp_lib_paths(project_dir: Path) -> dict[str, Path]:
 
 # ---------------------------------------------------------------- 3d models
 
+_MODEL_EXTS = {".wrl", ".step", ".stp"}
+
+
+def _models_in(lib_dir: Path) -> dict[str, Path]:
+    """3D model filename (lower case) -> absolute path, for one lib dir.
+
+    Case-insensitive: imports reference e.g. R0603.STEP while the file on
+    disk is R0603.step.
+    """
+    out: dict[str, Path] = {}
+    if lib_dir.is_dir():
+        for f in sorted(lib_dir.iterdir()):
+            if f.suffix.lower() in _MODEL_EXTS:
+                out.setdefault(f.name.lower(), f.resolve())
+    return out
+
+
 def model_index(libs: dict[str, Path]) -> dict[str, Path]:
     """3D model filename -> absolute path, across every footprint lib dir.
 
     Models live next to the footprints that use them (part dirs carry their
     own .step/.wrl; the circuit-synth standard library carries models for its
-    generic footprints).
+    generic footprints). Two lib dirs may ship a model under the same
+    filename (the same package imported for two parts); here the first dir
+    in path order wins, which is why a footprint's model is looked up in
+    its own lib dir first (locate_model) and in this index only after.
     """
-    exts = {".wrl", ".step", ".stp"}
     out: dict[str, Path] = {}
     for path in sorted(set(libs.values())):
-        if not path.is_dir():
-            continue
-        for f in sorted(path.iterdir()):
-            if f.suffix.lower() in exts:
-                # Case-insensitive: imports reference e.g. R0603.STEP while
-                # the file on disk is R0603.step.
-                out.setdefault(f.name.lower(), f.resolve())
+        for name, f in _models_in(path).items():
+            out.setdefault(name, f)
     return out
+
+
+def locate_model(filename: str, lib_dir: Path | None, index: dict[str, Path]) -> Path | None:
+    """The file a footprint's 3D model entry refers to, matched by filename:
+    the one in the footprint's own lib dir if it is there, else whichever
+    lib dir the index (model_index) has it from, else None."""
+    if not filename:
+        return None
+    name = Path(filename).name.lower()
+    own = _models_in(lib_dir).get(name) if lib_dir is not None else None
+    return own or index.get(name)
 
 
 def model_ref(model_path: Path, project_dir: Path) -> str:
@@ -296,57 +321,86 @@ def model_ref(model_path: Path, project_dir: Path) -> str:
     return "${KIPRJMOD}/" + Path(rel).as_posix()
 
 
-def normalize_models(board, project_dir: Path, libs: dict[str, Path]) -> int:
-    """Point every footprint 3D model at a file we can actually find.
+def _model_key(model, filename: str) -> tuple:
+    """What makes two 3D model entries the same: file, placement, visibility.
+
+    Numbers are compared to 1e-6: a board stores what pcbnew wrote, which
+    need not have every digit of a hand- or tool-written library file.
+    """
+    placement = (model.m_Offset, model.m_Scale, model.m_Rotation)
+    numbers = [round(v, 6) for vec in placement for v in (vec.x, vec.y, vec.z)]
+    return (filename, *numbers, round(model.m_Opacity, 6), bool(model.m_Show))
+
+
+def normalize_models(board, project_dir: Path, libs: dict[str, Path]) -> tuple[int, list[str]]:
+    """Keep every footprint's 3D models in step with its library footprint,
+    and pointing at files we can actually find.
 
     Model paths arrive in many shapes (bare filenames from part libs, stale
     `${KIPRJMOD}/../..` chains from older conventions); each is matched by
-    filename against the models carried by the project's footprint libs and
+    filename against the models in the footprint's own lib dir, then
+    against those of the project's other footprint libs (locate_model), and
     rewritten to a stable reference. Unknown filenames are left untouched.
 
-    Placed footprints with no 3D model at all inherit the model list (with
-    offsets/rotation) from their library footprint, so adding a model to a
-    part dir propagates to boards on the next sync.
-    Returns the number of rewritten/added paths.
+    The library footprint is the source of truth for the model list: when
+    a placed footprint's models (file, offset, rotation, scale, opacity,
+    visibility) differ from its library footprint's, the board's list is
+    replaced by the library's, so a model added to a part dir or a
+    corrected offset reaches boards on the next sync. Nothing else about
+    the footprint is touched. A library footprint none of whose models can
+    be located leaves the board's list alone: a dangling reference should
+    not spread to boards, and a model added by hand on the board to a
+    footprint whose library has none stays.
+
+    Returns (number of rewritten paths, references of the footprints whose
+    model list was refreshed from the library).
     """
     import pcbnew
 
     index = model_index(libs)
-    changed = 0
+
+    def stable(filename: str, lib_dir: Path | None) -> str:
+        found = locate_model(filename, lib_dir, index)
+        return model_ref(found, project_dir) if found is not None else filename
+
+    rewritten = 0
+    refreshed: list[str] = []
     lib_models: dict[str, list] = {}
     for fp in board.GetFootprints():
+        fpid = fp.GetFPID()
+        key = fpid.GetUniStringLibId()
+        lib_dir = libs.get(fpid.GetLibNickname().wx_str())
+        if key not in lib_models:
+            lib_fp = (
+                pcbnew.FootprintLoad(str(lib_dir), fpid.GetLibItemName().wx_str())
+                if lib_dir is not None
+                else None
+            )
+            # Iterating the SWIG vector yields copies, so these outlive the
+            # library footprint.
+            found = list(lib_fp.Models()) if lib_fp is not None else []
+            if not any(locate_model(str(m.m_Filename), lib_dir, index) for m in found):
+                found = []
+            lib_models[key] = [(m, stable(str(m.m_Filename), lib_dir)) for m in found]
+        wanted = lib_models[key]
         models = fp.Models()
-        if models.size() == 0:
-            fpid = fp.GetFPID()
-            lib_path = libs.get(fpid.GetLibNickname().wx_str())
-            key = fpid.GetUniStringLibId()
-            if key not in lib_models:
-                lib_fp = (
-                    pcbnew.FootprintLoad(str(lib_path), fpid.GetLibItemName().wx_str())
-                    if lib_path is not None
-                    else None
-                )
-                lib_models[key] = list(lib_fp.Models()) if lib_fp is not None else []
-            for src in lib_models[key]:
-                # Only inherit models whose file we can locate; a dangling
-                # reference in a library footprint should not spread to boards.
-                if Path(str(src.m_Filename)).name.lower() in index:
-                    models.push_back(src)  # push_back copies
-                    changed += 1
+        current = [_model_key(m, stable(str(m.m_Filename), lib_dir)) for m in models]
+        if wanted and current != [_model_key(src, filename) for src, filename in wanted]:
+            models.clear()
+            for src, filename in wanted:
+                models.push_back(src)  # push_back copies
+                models[models.size() - 1].m_Filename = filename
+            refreshed.append(fp.GetReference())
+            continue
         # Index access returns a reference; iterating the SWIG vector yields
         # copies whose mutation is silently lost.
         for i in range(models.size()):
-            current = str(models[i].m_Filename)
-            if not current:
-                continue
-            found = index.get(Path(current).name.lower())
-            if found is None:
-                continue
-            new = model_ref(found, project_dir)
-            if new != current:
+            old = str(models[i].m_Filename)
+            new = stable(old, lib_dir)
+            if new != old:
                 models[i].m_Filename = new
-                changed += 1
-    return changed
+                rewritten += 1
+    return rewritten, refreshed
 
 
 # ---------------------------------------------------------------- pcbnew ops
